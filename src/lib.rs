@@ -1,40 +1,89 @@
-use boot_region::{BYTES_PER_SECTOR_SHIFT, BYTES_PER_SECTOR};
+use data_region::ClusterHeap;
+use fat_region::FileAllocationTable;
+
+use crate::utils::{unsigned_align_to, unsigned_rounded_up_div};
 
 mod boot_region;
+mod data_region;
+mod fat_region;
+mod utils;
 
 #[derive(Debug)]
 pub enum ReadError {
-    OutOfBounds
+    OutOfBounds,
 }
 
-pub struct VirtualExFat {
+pub struct VirtualExFatBlockDevice {
     // boot sector
     volume_length: u64,
+    fat_offset: u32,
+    fat_length: u32,
     cluster_heap_offset: u32,
     cluster_count: u32,
     volume_serial_number: u32,
-    fat_offset: u32,
-    fat_length: u32,
+    bytes_per_sector_shift: u8,
     sectors_per_cluster_shift: u8,
     number_of_fats: u8,
+
+    fat_region: FileAllocationTable,
+    data_region: ClusterHeap,
 }
 
-impl VirtualExFat {
-    pub fn new() -> Self {
+impl VirtualExFatBlockDevice {
+    pub fn new(cluster_count: u32) -> Self {
+        let bytes_per_sector_shift = 9; // 512 byte sectors
+        let sectors_per_cluster_shift = 3; // 8 sectors, 4096 byte clusters
+        let number_of_fats = 1u8;
+
+        let min_fat_length =
+            unsigned_rounded_up_div((cluster_count + 2) * 4, 1 << bytes_per_sector_shift);
+
+        let fat_length = unsigned_align_to(min_fat_length, 1 << sectors_per_cluster_shift); // sectors
+        let fat_offset = 24; // sectors, no alignment
+        let cluster_heap_offset = fat_offset + fat_length; // sectors, no alignment
+        let volume_length = u64::from(cluster_heap_offset)
+            + (u64::from(cluster_count) * (1 << sectors_per_cluster_shift)); // sectors
+
+        let min_volume_length = (1 << 20) / (1 << bytes_per_sector_shift);
+        let min_fat_offset = 24;
+        let min_cluster_heap_offset = fat_offset + (fat_length * u32::from(number_of_fats));
+
+        assert!(volume_length >= min_volume_length);
+        assert!(fat_offset >= min_fat_offset);
+        assert!(fat_length >= min_fat_length);
+        assert!(cluster_heap_offset >= min_cluster_heap_offset);
+
+        let max_fat_offset = cluster_heap_offset - (fat_length * u32::from(number_of_fats));
+        let max_fat_length = (cluster_heap_offset - fat_offset) / u32::from(number_of_fats);
+        let max_cluster_heap_offset: u32 = u64::min(
+            u64::from(u32::MAX),
+            volume_length - (u64::from(cluster_count) * (1 << sectors_per_cluster_shift)),
+        )
+        .try_into()
+        .unwrap();
+        assert!(fat_offset <= max_fat_offset);
+        assert!(fat_length <= max_fat_length);
+        assert!(cluster_heap_offset <= max_cluster_heap_offset);
+
         Self {
-            volume_length: 6144,
-            cluster_heap_offset: 4096,
-            cluster_count: 256,
+            volume_length,
+            cluster_heap_offset,
+            cluster_count,
             volume_serial_number: rand::random(),
-            fat_offset: 2048,
-            fat_length: 8,
-            sectors_per_cluster_shift: 3, // 8 bytes
-            number_of_fats: 1,
+            fat_offset,
+            fat_length,
+            bytes_per_sector_shift,
+            sectors_per_cluster_shift,
+            number_of_fats,
+            fat_region: FileAllocationTable::empty(),
+            data_region: ClusterHeap::new(cluster_count),
         }
     }
 
-    /// `buffer` is assumed to be 512 bytes and zeroed
-    pub fn read_sector(&self, sector: u32, buffer: &mut [u8]) -> Result<(), ReadError> {
+    /// `buffer` is assumed to be zeroed
+    pub fn read_sector(&self, sector: u64, buffer: &mut [u8]) -> Result<(), ReadError> {
+        assert_eq!(buffer.len(), 1 << self.bytes_per_sector_shift);
+
         match sector {
             // main boot region
             0 => {
@@ -50,11 +99,11 @@ impl VirtualExFat {
                 region.first_cluster_of_root_directory = 5;
                 region.volume_serial_number = self.volume_serial_number;
                 region.filesystem_revision = 256; // 1.00
-                region.bytes_per_sector_shift = BYTES_PER_SECTOR_SHIFT;
+                region.bytes_per_sector_shift = self.bytes_per_sector_shift;
                 region.sectors_per_cluster_shift = self.sectors_per_cluster_shift;
                 region.number_of_fats = self.number_of_fats;
                 region.drive_select = 0x80;
-                region.percent_in_use = 0;
+                region.percent_in_use = 0xFF; // not available
                 region.boot_signature = [0x55, 0xAA];
 
                 Ok(())
@@ -83,7 +132,7 @@ impl VirtualExFat {
                 let mut checksum = 0u32;
 
                 for sector in 0..11 {
-                    let mut buffer = [0; BYTES_PER_SECTOR as usize];
+                    let mut buffer = vec![0; 1 << self.bytes_per_sector_shift];
                     self.read_sector(sector, &mut buffer).unwrap();
 
                     for (index, byte) in buffer.iter().enumerate() {
@@ -133,71 +182,92 @@ impl VirtualExFat {
 
                 // FAT alignment
                 let fat_alignment_start_sector = 24;
-                let fat_alignment_size = self.fat_offset - 24;
-                let fat_alignment_end_sector = fat_alignment_start_sector + fat_alignment_size;
+                let fat_alignment_size_sectors = u64::from(self.fat_offset) - 24;
+                let fat_alignment_end_sector =
+                    fat_alignment_start_sector + fat_alignment_size_sectors;
                 if sector >= fat_alignment_start_sector && sector < fat_alignment_end_sector {
-                    return Ok(())
+                    return Ok(());
                 }
 
                 // first FAT
-                let first_fat_start_sector = self.fat_offset;
-                let first_fat_size = self.fat_length;
-                let first_fat_end_sector = first_fat_start_sector + first_fat_size;
+                let first_fat_start_sector = u64::from(self.fat_offset);
+                let first_fat_size_sectors = u64::from(self.fat_length);
+                let first_fat_end_sector = first_fat_start_sector + first_fat_size_sectors;
                 if sector >= first_fat_start_sector && sector < first_fat_end_sector {
-                    return Ok(())
+                    let fat_sector = sector - first_fat_start_sector;
+                    self.fat_region.read_sector_first(fat_sector, buffer);
+                    return Ok(());
                 }
 
                 // second FAT
                 if self.number_of_fats > 1 {
-                    let second_fat_start_sector = self.fat_offset + self.fat_length;
-                    let second_fat_size = self.fat_length * u32::from(self.number_of_fats - 1);
-                    let second_fat_end_sector = second_fat_start_sector + second_fat_size;
+                    let second_fat_start_sector =
+                        u64::from(self.fat_offset) + u64::from(self.fat_length);
+                    let second_fat_size_sectors =
+                        u64::from(self.fat_length) * u64::from(self.number_of_fats - 1);
+                    let second_fat_end_sector = second_fat_start_sector + second_fat_size_sectors;
                     if sector >= second_fat_start_sector && sector < second_fat_end_sector {
-                        return Ok(())
+                        let fat_sector = sector - first_fat_start_sector;
+                        self.fat_region.read_sector_second(fat_sector, buffer);
+                        return Ok(());
                     }
                 }
 
                 // data region
 
                 // cluster heap alignment
-                let cluster_heap_alignment_start_sector = self.fat_offset + self.fat_length * u32::from(self.number_of_fats);
-                let cluster_heap_alignment_size = self.cluster_heap_offset - (self.fat_offset + self.fat_length * u32::from(self.number_of_fats));
-                let cluster_heap_alignment_end_sector = cluster_heap_alignment_start_sector + cluster_heap_alignment_size;
-                if sector >= cluster_heap_alignment_start_sector && sector < cluster_heap_alignment_end_sector {
-                    return Ok(())
+                let cluster_heap_alignment_start_sector = u64::from(self.fat_offset)
+                    + u64::from(self.fat_length) * u64::from(self.number_of_fats);
+                let cluster_heap_alignment_size_sectors =
+                    u64::from(self.cluster_heap_offset) - cluster_heap_alignment_start_sector;
+                let cluster_heap_alignment_end_sector =
+                    cluster_heap_alignment_start_sector + cluster_heap_alignment_size_sectors;
+                if sector >= cluster_heap_alignment_start_sector
+                    && sector < cluster_heap_alignment_end_sector
+                {
+                    return Ok(());
                 }
 
                 // cluster heap
-                let cluster_heap_start_sector = self.cluster_heap_offset;
-                let cluster_heap_size = self.cluster_count * (1 << self.sectors_per_cluster_shift);
-                let cluster_heap_end_sector = cluster_heap_start_sector + cluster_heap_size;
+                let cluster_heap_start_sector = u64::from(self.cluster_heap_offset);
+                let cluster_heap_size_sectors =
+                    u64::from(self.cluster_count) * (1 << self.sectors_per_cluster_shift);
+                let cluster_heap_end_sector = cluster_heap_start_sector + cluster_heap_size_sectors;
                 if sector >= cluster_heap_start_sector && sector < cluster_heap_end_sector {
-                    return Ok(())
+                    let heap_sector = cluster_heap_start_sector - sector;
+                    self.data_region.read_sector(heap_sector, buffer);
+                    return Ok(());
                 }
 
                 // excess space
-                let excess_space_start_sector = self.cluster_heap_offset + self.cluster_count * (1 << self.sectors_per_cluster_shift);
-                let excess_space_size = self.volume_length - u64::from(self.cluster_heap_offset + self.cluster_count * (1 << self.sectors_per_cluster_shift));
-                let excess_space_end_sector = excess_space_start_sector + excess_space_size as u32;
+                let excess_space_start_sector =
+                    u64::from(self.cluster_heap_offset) + cluster_heap_size_sectors;
+                let excess_space_size_sectors = self.volume_length - excess_space_start_sector;
+                let excess_space_end_sector = excess_space_start_sector + excess_space_size_sectors;
                 if sector >= excess_space_start_sector && sector < excess_space_end_sector {
-                    return Ok(())
+                    return Ok(());
                 }
-
-                dbg!(fat_alignment_start_sector);
-                dbg!(fat_alignment_end_sector);
-                dbg!(first_fat_start_sector);
-                dbg!(first_fat_end_sector);
-                dbg!(cluster_heap_alignment_start_sector);
-                dbg!(cluster_heap_alignment_end_sector);
-
-                dbg!(cluster_heap_start_sector);
-                dbg!(cluster_heap_end_sector);
-
-                dbg!(excess_space_start_sector);
-                dbg!(excess_space_end_sector);
 
                 Err(ReadError::OutOfBounds)
             }
         }
     }
+}
+
+#[test]
+fn instantiation() {
+    // 4 KiB clusters, 4 TiB - 3 clusters (2 reserved by FAT, 1 used during rounding)
+    let vexfat = VirtualExFatBlockDevice::new(1073741824 - 3);
+
+    let mut buffer = [0; 512];
+    vexfat
+        .read_sector(vexfat.fat_offset.into(), &mut buffer)
+        .unwrap();
+    assert_eq!(&buffer[..9], &[248, 255, 255, 255, 255, 255, 255, 255, 0]);
+
+    buffer = [0; 512];
+    vexfat
+        .read_sector(vexfat.cluster_heap_offset.into(), &mut buffer)
+        .unwrap();
+    assert_eq!(&buffer[..2], &[15, 0]);
 }
