@@ -71,7 +71,7 @@ struct GeneralPrimaryFlags {
 
 enum ClusterData {
     AllocationBitmap(AllocationBitmap),
-    UpcaseTable(Vec<u8>),
+    UpcaseTable(Vec<u16>),
     DirectoryEntry(DirectoryEntry),
 }
 
@@ -79,7 +79,7 @@ impl ClusterData {
     fn as_bytes(&self) -> &[u8] {
         match self {
             ClusterData::AllocationBitmap(ab) => ab.as_bytes(),
-            ClusterData::UpcaseTable(ut) => ut.as_slice(),
+            ClusterData::UpcaseTable(ut) => bytemuck::cast_slice(ut.as_slice()),
             ClusterData::DirectoryEntry(e) => e.as_bytes(),
         }
     }
@@ -148,14 +148,14 @@ impl ClusterHeap {
         clusters.insert(
             1,
             Cluster {
-                data: vec![ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[..4096]))],
+                data: vec![ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[..2048]))],
             },
         );
 
         clusters.insert(
             2,
             Cluster {
-                data: vec![ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[4096..]))],
+                data: vec![ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[2048..]))],
             },
         );
 
@@ -199,24 +199,24 @@ impl ClusterHeap {
 fn cluster_read() {
     let mut buffer = [0; 512];
     let mut cluster = Cluster {
-        data: vec![ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[..4096]))],
+        data: vec![ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[..2048c]))],
     };
     cluster.read_sector(0, &mut buffer);
-    assert_eq!(buffer, &UPCASE_TABLE[..512]);
+    assert_eq!(bytemuck::cast_slice::<_, u16>(&buffer), &UPCASE_TABLE[..256]);
 
     buffer = [0; 512];
     cluster.read_sector(1, &mut buffer);
-    assert_eq!(buffer, &UPCASE_TABLE[512..1024]);
+    assert_eq!(bytemuck::cast_slice::<_, u16>(&buffer), &UPCASE_TABLE[256..512]);
 
     buffer = [0; 512];
     cluster.data = vec![
-        ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[..32])),
-        ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[32..64])),
-        ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[64..96])),
-        ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[96..128])),
+        ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[..16])),
+        ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[16..32])),
+        ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[32..48])),
+        ClusterData::UpcaseTable(Vec::from(&UPCASE_TABLE[48..64])),
     ];
     cluster.read_sector(0, &mut buffer);
-    assert_eq!(&buffer[..128], &UPCASE_TABLE[..128]);
+    assert_eq!(bytemuck::cast_slice::<_, u16>(&buffer[..128]), &UPCASE_TABLE[..64]);
     assert_eq!(buffer[128..], [0; 384]);
 }
 
