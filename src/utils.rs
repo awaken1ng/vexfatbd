@@ -1,11 +1,11 @@
-pub struct Chain<T>
+pub struct SliceChain<T>
 where
     T: Iterator,
 {
     slices: Vec<T>,
 }
 
-impl<T> Chain<T>
+impl<T> SliceChain<T>
 where
     T: Iterator,
 {
@@ -14,7 +14,7 @@ where
     }
 }
 
-impl<T> Iterator for Chain<T>
+impl<T> Iterator for SliceChain<T>
 where
     T: Iterator,
 {
@@ -47,7 +47,7 @@ where
 
 #[test]
 fn chain() {
-    let chain = Chain::new(vec![b"123".iter(), b"456".iter()]);
+    let chain = SliceChain::new(vec![b"123".iter(), b"456".iter()]);
     let out: Vec<_> = chain.skip(2).take(3).cloned().collect();
     assert_eq!(out, b"345");
 }

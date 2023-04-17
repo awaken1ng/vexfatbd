@@ -5,23 +5,21 @@ use bytemuck::{Pod, Zeroable};
 use super::EntryType;
 
 pub struct AllocationBitmap {
+    cluster_count: u32,
     data: Vec<u8>,
 }
 
 impl AllocationBitmap {
-    pub fn new(allocated_clusters: u64) -> Self {
-        let bits_in_last_byte = allocated_clusters % 8;
-        let full_bytes = ((allocated_clusters - bits_in_last_byte) / 8) as usize;
-        let last_byte = (1 << bits_in_last_byte) - 1;
-
-        let mut data = vec![0xFF; full_bytes];
-        data.push(last_byte);
-
-        Self { data }
+    pub fn new(cluster_count: u32) -> Self {
+        Self {
+            cluster_count,
+            data: Vec::new(),
+        }
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        self.data.as_slice()
+    /// Size of the allocation bitmap in bytes
+    pub fn size(&self) -> u32 {
+        self.cluster_count / 8
     }
 
     pub fn set_cluster(&mut self, cluster_index: u64, allocated: bool) {
@@ -39,11 +37,26 @@ impl AllocationBitmap {
             *byte &= !(1 << (cluster_index % 8));
         }
     }
+
+    pub fn read_sector(&self, sector: u64, buffer: &mut [u8]) {
+        let bytes_per_sector = buffer.len();
+        let bytes_to_skip = sector as usize * bytes_per_sector;
+        let sector_data = self
+            .data
+            .iter()
+            .skip(bytes_to_skip)
+            .take(bytes_per_sector)
+            .cloned();
+
+        for (out, byte) in buffer.iter_mut().zip(sector_data) {
+            *out = byte;
+        }
+    }
 }
 
 #[test]
 fn allocation_bitmap() {
-    let mut bitmap = AllocationBitmap::new(0);
+    let mut bitmap = AllocationBitmap::new(512);
 
     bitmap.set_cluster(1, true);
     bitmap.set_cluster(2, true);
@@ -74,20 +87,20 @@ pub struct AllocationBitmapDirectoryEntry {
 }
 
 impl AllocationBitmapDirectoryEntry {
-    fn new(is_second_fat: bool, cluster_index: u32, cluster_count: u64) -> Self {
+    fn new(cluster_index: u32, cluster_count: u64, is_second_fat: bool) -> Self {
         Self {
             entry_type: EntryType::new_with_raw_value(0)
                 .with_type_code(u5::new(1))
                 .with_in_use(true), // 0x81
             bitmap_flags: BitmapFlags::new_with_raw_value(0).with_is_second_fat(is_second_fat),
             reserved: [0; 18],
-            first_cluster: 2, // FAT index, 0 in heap
+            first_cluster: cluster_index + 2, // convert to FAT index
             data_length: cluster_count / 8,
         }
     }
 
     pub fn new_first_fat(cluster_index: u32, cluster_count: u64) -> Self {
-        Self::new(false, cluster_index, cluster_count)
+        Self::new(cluster_index, cluster_count, false)
     }
 
     pub fn as_bytes(&self) -> &[u8] {

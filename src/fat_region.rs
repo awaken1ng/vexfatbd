@@ -2,14 +2,12 @@ use std::mem::size_of;
 
 pub struct FileAllocationTable {
     first: Vec<u32>,
-    second: Vec<u32>,
 }
 
 impl FileAllocationTable {
     pub fn empty() -> Self {
         Self {
             first: vec![0xFFFFFFF8, 0xFFFFFFFF],
-            second: vec![0xFFFFFFF8, 0xFFFFFFFF],
         }
     }
 
@@ -18,8 +16,7 @@ impl FileAllocationTable {
         let buffer: &mut [u32] = bytemuck::cast_slice_mut(buffer);
 
         for (out, fat_entry) in buffer.iter_mut().zip(
-            list
-                .iter()
+            list.iter()
                 .skip(fat_sector as usize * entries_per_sector)
                 .take(entries_per_sector)
                 .cloned(),
