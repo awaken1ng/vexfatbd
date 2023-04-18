@@ -1,12 +1,15 @@
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek};
 use std::mem::size_of;
+use std::path::Path;
 
 use itertools::Itertools;
 use static_assertions::const_assert;
 
 use crate::data_region::allocation_bitmap::{AllocationBitmap, AllocationBitmapDirectoryEntry};
 use crate::data_region::file::{
-    new_folder, FileDirectoryEntry, FileNameDirectoryEntry, StreamExtensionDirectoryEntry,
+    new_file, new_folder, FileDirectoryEntry, FileNameDirectoryEntry, StreamExtensionDirectoryEntry,
 };
 use crate::data_region::upcase_table::{UpcaseTableDirectoryEntry, UPCASE_TABLE};
 use crate::data_region::volume_label::VolumeLabelDirectoryEntry;
@@ -77,20 +80,16 @@ impl ClusterHeap {
         heap.insert(
             root_directory_start_cluster,
             Cluster {
-                data: vec![
-                    ClusterData::DirectoryEntry(DirectoryEntry::VolumeLabel(
-                        VolumeLabelDirectoryEntry::empty(),
-                    )),
-                    ClusterData::DirectoryEntry(DirectoryEntry::AllocationBitmap(
+                data: ClusterData::DirectoryEntries(DirectoryEntries(vec![
+                    DirectoryEntry::VolumeLabel(VolumeLabelDirectoryEntry::empty()),
+                    DirectoryEntry::AllocationBitmap(
                         AllocationBitmapDirectoryEntry::new_first_fat(
                             allocation_bitmap_start_cluster,
                             u64::from(cluster_count),
                         ),
-                    )),
-                    ClusterData::DirectoryEntry(DirectoryEntry::UpcaseTable(
-                        UpcaseTableDirectoryEntry::default(),
-                    )),
-                ],
+                    ),
+                    DirectoryEntry::UpcaseTable(UpcaseTableDirectoryEntry::default()),
+                ])),
             },
         );
 
@@ -133,14 +132,14 @@ impl ClusterHeap {
         }
     }
 
-    pub fn read_sector(&self, sector: u32, buffer: &mut [u8]) {
+    pub fn read_sector(&mut self, sector: u32, buffer: &mut [u8]) {
         let cluster_index = sector / self.sectors_per_cluster;
         let sector_in_cluster = sector % self.sectors_per_cluster;
         self.read_sector_in_cluster(cluster_index, sector_in_cluster, buffer);
     }
 
     /// `sector` is cluster relative index
-    fn read_sector_in_cluster(&self, cluster: u32, sector: u32, buffer: &mut [u8]) {
+    fn read_sector_in_cluster(&mut self, cluster: u32, sector: u32, buffer: &mut [u8]) {
         if (cluster >= self.allocation_bitmap_start_cluster)
             && (cluster < self.allocation_bitmap_end_cluster)
         {
@@ -164,8 +163,13 @@ impl ClusterHeap {
             for (out, byte) in buffer.iter_mut().zip(sector_data) {
                 *out = byte;
             }
-        } else if let Some(cluster) = self.heap.get(&cluster) {
-            cluster.read_sector(sector, buffer);
+        } else if let Some(cluster) = self.heap.get_mut(&cluster) {
+            match &mut cluster.data {
+                ClusterData::DirectoryEntries(entries) => entries.read_sector(sector, buffer),
+                ClusterData::FileMappedData(file) => {
+                    file.read_sector(sector * self.bytes_per_sector, buffer)
+                }
+            }
         }
     }
 
@@ -173,17 +177,24 @@ impl ClusterHeap {
         self.upcase_table_end_cluster
     }
 
-    pub fn add_directory(&mut self, root_cluster: u32, file_name: &str) {
-        dbg!(root_cluster);
-        let cluster_size = self.sectors_per_cluster * self.bytes_per_sector;
-        let cluster = self.heap.get_mut(&root_cluster).unwrap();
-
-        // empty directory is going to take up 1 cluster of space
-        let entries = new_folder(file_name, root_cluster, u64::from(cluster_size)).unwrap();
+    fn insert_entries_into_cluster(
+        &mut self,
+        cluster_index: u32,
+        entries: Vec<DirectoryEntry>,
+    ) -> u32 {
+        let cluster = self.heap.entry(cluster_index).or_insert(Cluster {
+            data: ClusterData::DirectoryEntries(DirectoryEntries(Vec::new())),
+        });
+        let cluster_entries = match &mut cluster.data {
+            ClusterData::DirectoryEntries(e) => e,
+            _ => panic!(),
+        };
+        let entries_in_cluster_count = cluster_entries.0.len();
 
         let entries_in_current_cluster = {
+            let cluster_size = self.sectors_per_cluster * self.bytes_per_sector;
             let max_entries_in_cluster = cluster_size / DirectoryEntry::SIZE as u32;
-            let new_length = (cluster.data.len() + entries.len()) as u32;
+            let new_length = (entries_in_cluster_count + entries.len()) as u32;
             if new_length > max_entries_in_cluster {
                 let entries_in_next_cluster = (max_entries_in_cluster - new_length) as usize;
 
@@ -196,50 +207,77 @@ impl ClusterHeap {
         let mut entries = entries.into_iter();
         for _ in 0..entries_in_current_cluster {
             let entry = entries.next().unwrap();
-            cluster.data.push(ClusterData::DirectoryEntry(entry));
+            cluster_entries.0.push(entry);
         }
 
         if entries.len() > 0 {
+            assert!(entries.len() <= 128); // FIXME
             let next_cluster_index = self.allocation_bitmap.allocate_next_cluster();
             let next_cluster = Cluster {
-                data: entries.map(ClusterData::DirectoryEntry).collect(),
+                data: ClusterData::DirectoryEntries(DirectoryEntries(entries.collect())),
             };
             self.heap.insert(next_cluster_index, next_cluster);
+            next_cluster_index
+        } else {
+            cluster_index
         }
+    }
+
+    fn insert_file_into_heap(&mut self, cluster_index: u32, mut file: File) -> u32 {
+        let file_size_bytes = file.seek(std::io::SeekFrom::End(0)).unwrap();
+        let file_size_clusters = unsigned_rounded_up_div(
+            file_size_bytes,
+            u64::from(self.sectors_per_cluster) * u64::from(self.bytes_per_sector),
+        );
+
+        // allocate space for the file
+        for _ in 0..file_size_clusters {
+            self.allocation_bitmap.allocate_next_cluster();
+        }
+
+        self.heap.insert(
+            cluster_index,
+            Cluster {
+                data: ClusterData::FileMappedData(FileMappedData { file }),
+            },
+        );
+
+        cluster_index + file_size_clusters as u32
+    }
+
+    pub fn add_directory(&mut self, root_cluster: u32, file_name: &str) -> u32 {
+        let fat_cluster = root_cluster + 2;
+
+        // empty directory is going to take up 1 cluster of space
+        let cluster_size = self.sectors_per_cluster * self.bytes_per_sector;
+        let entries = new_folder(file_name, fat_cluster + 1, u64::from(cluster_size)).unwrap();
+        let end_cluster = self.insert_entries_into_cluster(root_cluster, entries);
+        end_cluster + 1
+    }
+
+    pub fn add_file<P>(&mut self, first_cluster: u32, path: P) -> u32
+    where
+        P: AsRef<Path>,
+    {
+        let fat_cluster = first_cluster + 2;
+
+        let entries = new_file(&path, fat_cluster).unwrap();
+        let entry_end_cluster = self.insert_entries_into_cluster(first_cluster, entries);
+
+        let file = std::fs::File::open(path).unwrap();
+        let data_end_cluster = self.insert_file_into_heap(entry_end_cluster + 1, file);
+        data_end_cluster + 1
     }
 }
 
-#[test]
-fn feature() {
-    ClusterHeap::new(512, 8, 512);
-}
+struct DirectoryEntries(Vec<DirectoryEntry>);
 
-enum ClusterData {
-    DirectoryEntry(DirectoryEntry),
-}
-
-impl ClusterData {
-    fn as_bytes(&self) -> &[u8] {
-        match self {
-            ClusterData::DirectoryEntry(e) => e.as_bytes(),
-        }
-    }
-}
-
-struct Cluster {
-    data: Vec<ClusterData>,
-}
-
-impl Cluster {
+impl DirectoryEntries {
     fn read_sector(&self, sector: u32, buffer: &mut [u8]) {
         let bytes_per_sector = buffer.len();
         let bytes_to_skip = sector as usize * bytes_per_sector;
 
-        let slices = self
-            .data
-            .iter()
-            .map(|item| item.as_bytes().iter())
-            .collect();
+        let slices = self.0.iter().map(|item| item.as_bytes().iter()).collect();
         let sector_data = SliceChain::new(slices)
             .skip(bytes_to_skip)
             .take(bytes_per_sector);
@@ -249,10 +287,33 @@ impl Cluster {
     }
 }
 
+struct FileMappedData {
+    file: File,
+}
+
+impl FileMappedData {
+    fn read_sector(&mut self, offset: u32, buffer: &mut [u8]) {
+        self.file
+            .seek(std::io::SeekFrom::Start(u64::from(offset)))
+            .unwrap();
+        let _ = self.file.read(buffer).unwrap();
+    }
+}
+
+enum ClusterData {
+    DirectoryEntries(DirectoryEntries),
+    FileMappedData(FileMappedData),
+}
+
+struct Cluster {
+    data: ClusterData,
+}
+
 #[test]
 fn heap_read() {
     const BYTES_PER_SECTOR: usize = 512;
-    let heap = ClusterHeap::new(BYTES_PER_SECTOR as _, 8, 512);
+    let mut heap = ClusterHeap::new(BYTES_PER_SECTOR as _, 8, 512);
+    heap.add_directory(heap.root_directory_cluster(), "hello world");
 
     // allocation bitmap
     let mut buffer = [0; BYTES_PER_SECTOR];

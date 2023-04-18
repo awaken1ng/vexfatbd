@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::utils::{unsigned_align_to, unsigned_rounded_up_div};
 
 mod boot_region;
@@ -75,7 +77,7 @@ impl VirtualExFatBlockDevice {
             volume_length,
             cluster_heap_offset,
             cluster_count,
-            first_cluster_of_root_directory: heap.root_directory_cluster(),
+            first_cluster_of_root_directory: heap.root_directory_cluster() + 2,
             volume_serial_number: rand::random(),
             fat_offset,
             fat_length,
@@ -87,7 +89,7 @@ impl VirtualExFatBlockDevice {
     }
 
     /// `buffer` is assumed to be zeroed
-    pub fn read_sector(&self, sector: u64, buffer: &mut [u8]) -> Result<(), ReadError> {
+    pub fn read_sector(&mut self, sector: u64, buffer: &mut [u8]) -> Result<(), ReadError> {
         assert_eq!(buffer.len(), 1 << self.bytes_per_sector_shift);
 
         match sector {
@@ -258,8 +260,15 @@ impl VirtualExFatBlockDevice {
         }
     }
 
-    pub fn add_directory(&mut self, root_cluster: u32, file_name: &str) {
+    pub fn add_directory(&mut self, root_cluster: u32, file_name: &str) -> u32 {
         self.heap.add_directory(root_cluster, file_name)
+    }
+
+    pub fn add_file<P>(&mut self, first_cluster: u32, path: P) -> u32
+    where
+        P: AsRef<Path>,
+    {
+        self.heap.add_file(first_cluster, path)
     }
 }
 
@@ -268,7 +277,7 @@ fn read_sector() {
     use crate::data_region::volume_label::VolumeLabelDirectoryEntry;
 
     // 4 KiB clusters, 4 TiB - 3 clusters (2 reserved by FAT, 1 used during rounding) volume
-    let vexfat = VirtualExFatBlockDevice::new(1073741824 - 3);
+    let mut vexfat = VirtualExFatBlockDevice::new(1073741824 - 3);
 
     let mut buffer = [0; 512];
     vexfat
@@ -290,7 +299,7 @@ fn read_sector() {
     assert_eq!(&buffer[..32], VolumeLabelDirectoryEntry::empty().as_bytes());
 
     // 4 KiB clusters, 4 MiB volume
-    let vexfat = VirtualExFatBlockDevice::new(512);
+    let mut vexfat = VirtualExFatBlockDevice::new(512);
 
     let mut buffer = [0; 512];
     vexfat

@@ -1,3 +1,5 @@
+use std::{path::Path, fs, io::Seek};
+
 use arbitrary_int::{u10, u4, u5, u6, u7};
 use bitbybit::bitfield;
 use bytemuck::{Pod, Zeroable};
@@ -197,17 +199,9 @@ pub enum FileDirectoryEntryError {
     IllegalCharactersInName,
 }
 
-pub fn new_folder(
+fn new_file_name_entry(
     file_name: &str,
-    first_cluster: u32,
-    cluster_size: u64,
-) -> Result<Vec<DirectoryEntry>, FileDirectoryEntryError> {
-    let name_length: u8 = file_name
-        .chars()
-        .count()
-        .try_into()
-        .map_err(|_| FileDirectoryEntryError::NameTooLong)?;
-
+) -> Result<Vec<FileNameDirectoryEntry>, FileDirectoryEntryError> {
     let contains_illegal_chars = file_name.chars().any(|ch| {
         matches!(
             ch,
@@ -227,9 +221,6 @@ pub fn new_folder(
         return Err(FileDirectoryEntryError::IllegalCharactersInName);
     }
 
-    let upcased_name = upcased_file_name(file_name);
-    let name_hash = name_hash(&upcased_name);
-
     let mut file_name_entries = Vec::new();
     for chunk in file_name.encode_utf16().chunks(15).into_iter() {
         let mut entry = FileNameDirectoryEntry {
@@ -247,6 +238,25 @@ pub fn new_folder(
 
         file_name_entries.push(entry);
     }
+
+    Ok(file_name_entries)
+}
+
+pub fn new_folder(
+    file_name: &str,
+    first_cluster: u32,
+    cluster_size: u64,
+) -> Result<Vec<DirectoryEntry>, FileDirectoryEntryError> {
+    let name_length: u8 = file_name
+        .encode_utf16()
+        .count()
+        .try_into()
+        .map_err(|_| FileDirectoryEntryError::NameTooLong)?;
+
+    let upcased_name = upcased_file_name(file_name);
+    let name_hash = name_hash(&upcased_name);
+
+    let file_name_entries = new_file_name_entry(file_name)?;
 
     let stream_extension_entry = StreamExtensionDirectoryEntry {
         entry_type: EntryType::new_with_raw_value(0)
@@ -272,6 +282,77 @@ pub fn new_folder(
         secondary_count: 1 + file_name_entries.len() as u8,
         set_checksum: 0, // set later
         file_attributes: FileAttributes::new_with_raw_value(0).with_directory(true),
+        reserved_1: 0,
+        create_timestamp: 0,             // TODO
+        last_modified_timestamp: 0,      // TODO
+        last_accessed_timestamp: 0,      // TODO
+        create_10ms_increment: 0,        // TODO
+        last_modified_10ms_increment: 0, // TODO
+        create_utc_offset: 0,            // TODO
+        last_modified_utc_offset: 0,     // TODO
+        last_accessed_utc_offset: 0,     // TODO
+        reserved_2: [0; 7],
+    };
+
+    let mut checksum = entry_checksum(0, bytemuck::bytes_of(&file_entry), true);
+    checksum = entry_checksum(checksum, bytemuck::bytes_of(&stream_extension_entry), false);
+    for file_name_entry in &file_name_entries {
+        checksum = entry_checksum(checksum, bytemuck::bytes_of(file_name_entry), false);
+    }
+    file_entry.set_checksum = checksum;
+
+    let mut entries = vec![
+        DirectoryEntry::File(file_entry),
+        DirectoryEntry::StreamExtension(stream_extension_entry),
+    ];
+    entries.extend(file_name_entries.into_iter().map(DirectoryEntry::FileName));
+
+    Ok(entries)
+}
+
+pub fn new_file<P>(path: P, first_cluster: u32) -> Result<Vec<DirectoryEntry>, FileDirectoryEntryError>
+where
+    P: AsRef<Path>,
+{
+    let file_name = path.as_ref().file_name().unwrap_or_default().to_string_lossy();
+    let name_length: u8 = file_name
+        .encode_utf16()
+        .count()
+        .try_into()
+        .map_err(|_| FileDirectoryEntryError::NameTooLong)?;
+
+    let upcased_name = upcased_file_name(&file_name);
+    let name_hash = name_hash(&upcased_name);
+
+    let file_name_entries = new_file_name_entry(&file_name)?;
+
+    let mut file = fs::File::open(path).unwrap();
+    let file_size = file.seek(std::io::SeekFrom::End(0)).unwrap();
+
+    let stream_extension_entry = StreamExtensionDirectoryEntry {
+        entry_type: EntryType::new_with_raw_value(0)
+            .with_type_category(true)
+            .with_in_use(true), // 0xC0
+        general_secondary_flags: GeneralPrimaryFlags::new_with_raw_value(0)
+            .with_allocation_possible(true)
+            .with_no_fat_chain(true),
+        reserved_1: 0,
+        name_length,
+        name_hash,
+        reserved_2: 0,
+        valid_data_length: file_size,
+        reserved_3: 0,
+        first_cluster,
+        data_length: file_size,
+    };
+
+    let mut file_entry = FileDirectoryEntry {
+        entry_type: EntryType::new_with_raw_value(0)
+            .with_type_code(u5::new(5))
+            .with_in_use(true), // 0x85
+        secondary_count: 1 + file_name_entries.len() as u8,
+        set_checksum: 0, // set later
+        file_attributes: FileAttributes::new_with_raw_value(0).with_read_only(true),
         reserved_1: 0,
         create_timestamp: 0,             // TODO
         last_modified_timestamp: 0,      // TODO
