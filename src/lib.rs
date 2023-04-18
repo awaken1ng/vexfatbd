@@ -22,7 +22,7 @@ pub struct VirtualExFatBlockDevice {
     fat_length: u32,
     cluster_heap_offset: u32,
     cluster_count: u32,
-    first_cluster_of_root_directory: u32,
+    pub first_cluster_of_root_directory: u32,
     volume_serial_number: u32,
     bytes_per_sector_shift: u8,
     sectors_per_cluster_shift: u8,
@@ -89,10 +89,10 @@ impl VirtualExFatBlockDevice {
     }
 
     /// `buffer` is assumed to be zeroed
-    pub fn read_sector(&mut self, sector: u64, buffer: &mut [u8]) -> Result<(), ReadError> {
+    fn read_sector(&mut self, sector_index: u64, buffer: &mut [u8]) -> Result<(), ReadError> {
         assert_eq!(buffer.len(), 1 << self.bytes_per_sector_shift);
 
-        match sector {
+        match sector_index {
             // main boot region
             0 => {
                 // main boot sector
@@ -170,7 +170,7 @@ impl VirtualExFatBlockDevice {
             }
             13..=20 => {
                 // backup extended boot sectors
-                self.read_sector(sector - 12, buffer)
+                self.read_sector(sector_index - 12, buffer)
             }
             21 => {
                 // backup OEM parameters
@@ -193,7 +193,9 @@ impl VirtualExFatBlockDevice {
                 let fat_alignment_size_sectors = u64::from(self.fat_offset) - 24;
                 let fat_alignment_end_sector =
                     fat_alignment_start_sector + fat_alignment_size_sectors;
-                if sector >= fat_alignment_start_sector && sector < fat_alignment_end_sector {
+                if sector_index >= fat_alignment_start_sector
+                    && sector_index < fat_alignment_end_sector
+                {
                     return Ok(());
                 }
 
@@ -201,8 +203,8 @@ impl VirtualExFatBlockDevice {
                 let first_fat_start_sector = u64::from(self.fat_offset);
                 let first_fat_size_sectors = u64::from(self.fat_length);
                 let first_fat_end_sector = first_fat_start_sector + first_fat_size_sectors;
-                if sector >= first_fat_start_sector && sector < first_fat_end_sector {
-                    let fat_sector = sector - first_fat_start_sector;
+                if sector_index >= first_fat_start_sector && sector_index < first_fat_end_sector {
+                    let fat_sector = sector_index - first_fat_start_sector;
                     self.heap.fat.read_sector_first(fat_sector, buffer);
                     return Ok(());
                 }
@@ -214,8 +216,10 @@ impl VirtualExFatBlockDevice {
                     let second_fat_size_sectors =
                         u64::from(self.fat_length) * u64::from(self.number_of_fats - 1);
                     let second_fat_end_sector = second_fat_start_sector + second_fat_size_sectors;
-                    if sector >= second_fat_start_sector && sector < second_fat_end_sector {
-                        let _fat_sector = sector - second_fat_start_sector;
+                    if sector_index >= second_fat_start_sector
+                        && sector_index < second_fat_end_sector
+                    {
+                        let _fat_sector = sector_index - second_fat_start_sector;
                         unimplemented!();
                     }
                 }
@@ -229,8 +233,8 @@ impl VirtualExFatBlockDevice {
                     u64::from(self.cluster_heap_offset) - cluster_heap_alignment_start_sector;
                 let cluster_heap_alignment_end_sector =
                     cluster_heap_alignment_start_sector + cluster_heap_alignment_size_sectors;
-                if sector >= cluster_heap_alignment_start_sector
-                    && sector < cluster_heap_alignment_end_sector
+                if sector_index >= cluster_heap_alignment_start_sector
+                    && sector_index < cluster_heap_alignment_end_sector
                 {
                     return Ok(());
                 }
@@ -240,8 +244,10 @@ impl VirtualExFatBlockDevice {
                 let cluster_heap_size_sectors =
                     u64::from(self.cluster_count) * (1 << self.sectors_per_cluster_shift);
                 let cluster_heap_end_sector = cluster_heap_start_sector + cluster_heap_size_sectors;
-                if sector >= cluster_heap_start_sector && sector < cluster_heap_end_sector {
-                    let heap_sector = (sector - cluster_heap_start_sector) as u32;
+                if sector_index >= cluster_heap_start_sector
+                    && sector_index < cluster_heap_end_sector
+                {
+                    let heap_sector = (sector_index - cluster_heap_start_sector) as u32;
                     self.heap.read_sector(heap_sector, buffer);
                     return Ok(());
                 }
@@ -251,12 +257,46 @@ impl VirtualExFatBlockDevice {
                     u64::from(self.cluster_heap_offset) + cluster_heap_size_sectors;
                 let excess_space_size_sectors = self.volume_length - excess_space_start_sector;
                 let excess_space_end_sector = excess_space_start_sector + excess_space_size_sectors;
-                if sector >= excess_space_start_sector && sector < excess_space_end_sector {
+                if sector_index >= excess_space_start_sector
+                    && sector_index < excess_space_end_sector
+                {
                     return Ok(());
                 }
 
                 Err(ReadError::OutOfBounds)
             }
+        }
+    }
+
+    pub fn read(&mut self, mut sector_index: u64, buffer: &mut [u8]) -> Result<(), ReadError> {
+        let bytes_per_sector = 1 << self.bytes_per_sector_shift;
+        let mut left = buffer.len();
+
+        if left == bytes_per_sector {
+            self.read_sector(sector_index, buffer)
+        } else {
+            let mut index = 0;
+
+            while left > 0 {
+                let mut sector = vec![0; bytes_per_sector];
+                self.read_sector(sector_index, &mut sector)?;
+
+                let to_write = if left >= bytes_per_sector {
+                    bytes_per_sector
+                } else {
+                    left
+                };
+
+                for byte in sector.iter().take(to_write).cloned() {
+                    buffer[index] = byte;
+                    index += 1;
+                    sector_index += 1;
+                }
+
+                left -= to_write;
+            }
+
+            Ok(())
         }
     }
 
@@ -320,4 +360,25 @@ fn read_sector() {
         .unwrap();
     assert_eq!(buffer[0], 0b00001111); // 4 clusters
     assert_eq!(&buffer[1..], [0; 511]);
+}
+
+#[test]
+fn read() {
+    // 4 KiB clusters, 4 MiB volume
+    let mut vexfat = VirtualExFatBlockDevice::new(512);
+
+    let mut buffer1 = [0; 512];
+    let mut buffer2 = [0; 512];
+    vexfat
+        .read_sector(vexfat.fat_offset.into(), &mut buffer1)
+        .unwrap();
+    vexfat
+        .read_sector((vexfat.fat_offset + 1).into(), &mut buffer2)
+        .unwrap();
+
+    let mut buffer = [0; 1024];
+    vexfat.read(vexfat.fat_offset.into(), &mut buffer).unwrap();
+
+    assert_eq!(buffer[..512], buffer1);
+    assert_eq!(buffer[512..], buffer2);
 }
