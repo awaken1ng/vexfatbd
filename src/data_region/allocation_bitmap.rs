@@ -22,15 +22,15 @@ impl AllocationBitmap {
         self.cluster_count / 8
     }
 
-    pub fn set_cluster(&mut self, cluster_index: u64, allocated: bool) {
-        let index = (cluster_index / 8) as usize;
+    fn set_cluster(&mut self, cluster_index: u32, allocated: bool) {
+        let bitmap_index = (cluster_index / 8) as usize;
 
-        let extend_by = (index + 1) - self.data.len();
+        let extend_by = (bitmap_index + 1) - self.data.len();
         if extend_by > 0 {
             self.data.extend(vec![0; extend_by]);
         }
 
-        let byte = self.data.get_mut(index).unwrap();
+        let byte = self.data.get_mut(bitmap_index).unwrap();
         if allocated {
             *byte |= 1 << (cluster_index % 8);
         } else {
@@ -38,7 +38,7 @@ impl AllocationBitmap {
         }
     }
 
-    pub fn read_sector(&self, sector: u64, buffer: &mut [u8]) {
+    pub fn read_sector(&self, sector: u32, buffer: &mut [u8]) {
         let bytes_per_sector = buffer.len();
         let bytes_to_skip = sector as usize * bytes_per_sector;
         let sector_data = self
@@ -52,18 +52,52 @@ impl AllocationBitmap {
             *out = byte;
         }
     }
+
+    fn allocated_clusters_count(&self) -> u32 {
+        let all_but_last_eight = self.data.len().saturating_sub(1) * 8;
+        let last_eight = match self.data.last().cloned().unwrap_or_default() {
+            0b11111111 => 8, // 8 clusters allocated
+            0b01111111 => 7,
+            0b00111111 => 6,
+            0b00011111 => 5,
+            0b00001111 => 4,
+            0b00000111 => 3,
+            0b00000011 => 2,
+            0b00000001 => 1,
+            0b00000000 => 0,
+            _ => unreachable!(),
+        };
+
+        (all_but_last_eight + last_eight).try_into().unwrap()
+    }
+
+    pub fn allocate_next_cluster(&mut self) -> u32 {
+        let next_cluster = self.allocated_clusters_count();
+        self.set_cluster(next_cluster, true);
+        next_cluster
+    }
 }
 
 #[test]
 fn allocation_bitmap() {
     let mut bitmap = AllocationBitmap::new(512);
 
-    bitmap.set_cluster(1, true);
-    bitmap.set_cluster(2, true);
-    assert_eq!(&bitmap.data, &[6]);
+    bitmap.allocate_next_cluster();
+    assert_eq!(&bitmap.data, &[0b00000001]);
 
-    bitmap.set_cluster(2, false);
-    assert_eq!(&bitmap.data, &[2]);
+    bitmap.allocate_next_cluster();
+    bitmap.allocate_next_cluster();
+    assert_eq!(&bitmap.data, &[0b00000111]);
+
+    bitmap.allocate_next_cluster();
+    bitmap.allocate_next_cluster();
+    bitmap.allocate_next_cluster();
+    bitmap.allocate_next_cluster();
+    bitmap.allocate_next_cluster();
+    assert_eq!(&bitmap.data, &[0b11111111]);
+
+    bitmap.allocate_next_cluster();
+    assert_eq!(&bitmap.data, &[0b11111111, 0b00000001]);
 }
 
 #[bitfield(u8)]

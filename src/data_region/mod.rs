@@ -3,6 +3,7 @@ use bitbybit::bitfield;
 use bytemuck::{Pod, Zeroable};
 
 pub mod allocation_bitmap;
+pub mod file;
 pub mod upcase_table;
 pub mod volume_label;
 

@@ -268,3 +268,23 @@ impl Default for UpcaseTableDirectoryEntry {
         }
     }
 }
+
+pub fn upcased_file_name(file_name: &str) -> Vec<u16> {
+    let mut upcased = Vec::new();
+
+    for ch in file_name.encode_utf16() {
+        upcased.push(match UPCASE_TABLE.get(usize::from(ch)).cloned() {
+            Some(upper) => upper,
+            None => ch,
+        })
+    }
+
+    upcased
+}
+
+#[test]
+fn upcasing() {
+    let upcased_utf16 = upcased_file_name("Hello World");
+    let upcased_utf8 = String::from_utf16(&upcased_utf16).unwrap();
+    assert_eq!(upcased_utf8, "HELLO WORLD");
+}

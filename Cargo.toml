@@ -1,7 +1,7 @@
 # https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [package]
-name = "vexfat"
+name = "vexfatbd"
 version = "0.1.0"
 edition = "2021"
 

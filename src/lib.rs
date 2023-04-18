@@ -1,7 +1,4 @@
-use crate::{
-    data_region::volume_label::VolumeLabelDirectoryEntry,
-    utils::{unsigned_align_to, unsigned_rounded_up_div},
-};
+use crate::utils::{unsigned_align_to, unsigned_rounded_up_div};
 
 mod boot_region;
 pub(crate) mod data_region;
@@ -23,6 +20,7 @@ pub struct VirtualExFatBlockDevice {
     fat_length: u32,
     cluster_heap_offset: u32,
     cluster_count: u32,
+    first_cluster_of_root_directory: u32,
     volume_serial_number: u32,
     bytes_per_sector_shift: u8,
     sectors_per_cluster_shift: u8,
@@ -67,21 +65,24 @@ impl VirtualExFatBlockDevice {
         assert!(fat_length <= max_fat_length);
         assert!(cluster_heap_offset <= max_cluster_heap_offset);
 
+        let heap = ClusterHeap::new(
+            1 << bytes_per_sector_shift,
+            1 << sectors_per_cluster_shift,
+            cluster_count,
+        );
+
         Self {
             volume_length,
             cluster_heap_offset,
             cluster_count,
+            first_cluster_of_root_directory: heap.root_directory_cluster(),
             volume_serial_number: rand::random(),
             fat_offset,
             fat_length,
             bytes_per_sector_shift,
             sectors_per_cluster_shift,
             number_of_fats,
-            heap: ClusterHeap::new(
-                1 << bytes_per_sector_shift,
-                1 << sectors_per_cluster_shift,
-                cluster_count,
-            ),
+            heap,
         }
     }
 
@@ -101,7 +102,7 @@ impl VirtualExFatBlockDevice {
                 region.fat_length = self.fat_length;
                 region.cluster_heap_offset = self.cluster_heap_offset;
                 region.cluster_count = self.cluster_count;
-                region.first_cluster_of_root_directory = 5;
+                region.first_cluster_of_root_directory = self.first_cluster_of_root_directory;
                 region.volume_serial_number = self.volume_serial_number;
                 region.filesystem_revision = 256; // 1.00
                 region.bytes_per_sector_shift = self.bytes_per_sector_shift;
@@ -238,7 +239,7 @@ impl VirtualExFatBlockDevice {
                     u64::from(self.cluster_count) * (1 << self.sectors_per_cluster_shift);
                 let cluster_heap_end_sector = cluster_heap_start_sector + cluster_heap_size_sectors;
                 if sector >= cluster_heap_start_sector && sector < cluster_heap_end_sector {
-                    let heap_sector = sector - cluster_heap_start_sector;
+                    let heap_sector = (sector - cluster_heap_start_sector) as u32;
                     self.heap.read_sector(heap_sector, buffer);
                     return Ok(());
                 }
@@ -256,10 +257,16 @@ impl VirtualExFatBlockDevice {
             }
         }
     }
+
+    pub fn add_directory(&mut self, root_cluster: u32, file_name: &str) {
+        self.heap.add_directory(root_cluster, file_name)
+    }
 }
 
 #[test]
 fn read_sector() {
+    use crate::data_region::volume_label::VolumeLabelDirectoryEntry;
+
     // 4 KiB clusters, 4 TiB - 3 clusters (2 reserved by FAT, 1 used during rounding) volume
     let vexfat = VirtualExFatBlockDevice::new(1073741824 - 3);
 
@@ -267,8 +274,10 @@ fn read_sector() {
     vexfat
         .read_sector(vexfat.fat_offset.into(), &mut buffer)
         .unwrap();
-    assert_eq!(&buffer[..8], &[248, 255, 255, 255, 255, 255, 255, 255]);
-    assert_eq!(&buffer[8..512], &[0; 504]);
+    assert_eq!(
+        &buffer[..16],
+        &[248, 255, 255, 255, 255, 255, 255, 255, 3, 0, 0, 0, 4, 0, 0, 0]
+    );
 
     let allocation_bitmap_size_sectors = 32770 * 8;
     buffer = [0; 512];
@@ -287,13 +296,19 @@ fn read_sector() {
     vexfat
         .read_sector(vexfat.fat_offset.into(), &mut buffer)
         .unwrap();
-    assert_eq!(&buffer[..8], &[248, 255, 255, 255, 255, 255, 255, 255]);
-    assert_eq!(&buffer[8..512], &[0; 504]);
+    assert_eq!(
+        &buffer[..24],
+        &[
+            248, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 4, 0, 0, 0, 255, 255, 255,
+            255, 255, 255, 255, 255
+        ]
+    );
+    assert_eq!(&buffer[24..512], &[0; 488]);
 
     let mut buffer = [0; 512];
     vexfat
         .read_sector(vexfat.cluster_heap_offset.into(), &mut buffer)
         .unwrap();
-    assert_eq!(buffer[0], 0x0F); // 4 clusters
+    assert_eq!(buffer[0], 0b00001111); // 4 clusters
     assert_eq!(&buffer[1..], [0; 511]);
 }
