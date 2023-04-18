@@ -56,6 +56,7 @@ pub struct ClusterHeap {
     upcase_table_end_cluster: u32,
 
     heap: HashMap<u32, Cluster>,
+    lookup: HashMap<u32, u32>,
 }
 
 impl ClusterHeap {
@@ -77,6 +78,7 @@ impl ClusterHeap {
         let root_directory_start_cluster = upcase_table_end_cluster;
 
         let mut heap = HashMap::new();
+        let mut lookup = HashMap::new();
         heap.insert(
             root_directory_start_cluster,
             Cluster {
@@ -92,6 +94,7 @@ impl ClusterHeap {
                 ])),
             },
         );
+        lookup.insert(root_directory_start_cluster, root_directory_start_cluster);
 
         for _ in 0..=upcase_table_end_cluster {
             allocation_bitmap.allocate_next_cluster();
@@ -129,6 +132,7 @@ impl ClusterHeap {
             upcase_table_end_cluster,
 
             heap,
+            lookup,
         }
     }
 
@@ -139,17 +143,17 @@ impl ClusterHeap {
     }
 
     /// `sector` is cluster relative index
-    fn read_sector_in_cluster(&mut self, cluster: u32, sector: u32, buffer: &mut [u8]) {
-        if (cluster >= self.allocation_bitmap_start_cluster)
-            && (cluster < self.allocation_bitmap_end_cluster)
+    fn read_sector_in_cluster(&mut self, cluster_index: u32, sector: u32, buffer: &mut [u8]) {
+        if (cluster_index >= self.allocation_bitmap_start_cluster)
+            && (cluster_index < self.allocation_bitmap_end_cluster)
         {
-            let relative_cluster = cluster - self.allocation_bitmap_start_cluster;
+            let relative_cluster = cluster_index - self.allocation_bitmap_start_cluster;
             let bitmap_sector = (relative_cluster * self.sectors_per_cluster) + sector;
             self.allocation_bitmap.read_sector(bitmap_sector, buffer);
-        } else if cluster >= self.upcase_table_start_cluster
-            && cluster < self.upcase_table_end_cluster
+        } else if cluster_index >= self.upcase_table_start_cluster
+            && cluster_index < self.upcase_table_end_cluster
         {
-            let relative_cluster = cluster - self.upcase_table_start_cluster;
+            let relative_cluster = cluster_index - self.upcase_table_start_cluster;
             let sector = (relative_cluster * self.sectors_per_cluster) + sector;
 
             let bytes_to_skip = sector as usize * self.bytes_per_sector as usize;
@@ -163,7 +167,10 @@ impl ClusterHeap {
             for (out, byte) in buffer.iter_mut().zip(sector_data) {
                 *out = byte;
             }
-        } else if let Some(cluster) = self.heap.get_mut(&cluster) {
+        }
+        else if let Some(first_cluster) = self.lookup.get(&cluster_index).cloned() {
+            let cluster = self.heap.get_mut(&first_cluster).unwrap();
+            let sector = (cluster_index - first_cluster) * self.sectors_per_cluster + sector;
             match &mut cluster.data {
                 ClusterData::DirectoryEntries(entries) => entries.read_sector(sector, buffer),
                 ClusterData::FileMappedData(file) => {
@@ -209,6 +216,7 @@ impl ClusterHeap {
             let entry = entries.next().unwrap();
             cluster_entries.0.push(entry);
         }
+        self.lookup.insert(cluster_index, cluster_index);
 
         if entries.len() > 0 {
             assert!(entries.len() <= 128); // FIXME
@@ -217,13 +225,14 @@ impl ClusterHeap {
                 data: ClusterData::DirectoryEntries(DirectoryEntries(entries.collect())),
             };
             self.heap.insert(next_cluster_index, next_cluster);
+            self.lookup.insert(next_cluster_index, cluster_index);
             next_cluster_index
         } else {
             cluster_index
         }
     }
 
-    fn insert_file_into_heap(&mut self, cluster_index: u32, mut file: File) -> u32 {
+    fn insert_file_into_heap(&mut self, first_data_cluster_index: u32, mut file: File) -> u32 {
         let file_size_bytes = file.seek(std::io::SeekFrom::End(0)).unwrap();
         let file_size_clusters = unsigned_rounded_up_div(
             file_size_bytes,
@@ -231,18 +240,20 @@ impl ClusterHeap {
         );
 
         // allocate space for the file
-        for _ in 0..file_size_clusters {
+        self.lookup.insert(first_data_cluster_index, first_data_cluster_index);
+        for i in 0..file_size_clusters as u32 {
+            self.lookup.insert(first_data_cluster_index + i, first_data_cluster_index);
             self.allocation_bitmap.allocate_next_cluster();
         }
 
         self.heap.insert(
-            cluster_index,
+            first_data_cluster_index,
             Cluster {
                 data: ClusterData::FileMappedData(FileMappedData { file }),
             },
         );
 
-        cluster_index + file_size_clusters as u32
+        first_data_cluster_index + file_size_clusters as u32
     }
 
     pub fn add_directory(&mut self, root_cluster: u32, file_name: &str) -> u32 {
@@ -261,7 +272,7 @@ impl ClusterHeap {
     {
         let fat_cluster = first_cluster + 2;
 
-        let entries = new_file(&path, fat_cluster).unwrap();
+        let entries = new_file(&path, fat_cluster + 1).unwrap();
         let entry_end_cluster = self.insert_entries_into_cluster(first_cluster, entries);
 
         let file = std::fs::File::open(path).unwrap();
