@@ -287,7 +287,7 @@ impl VirtualExFatBlockDevice {
     }
 
     pub fn add_directory_in_root(&mut self, name: &str) -> u32 {
-        self.heap.add_directory(self.first_cluster_of_root_directory - 2, name)
+        self.heap.add_directory(self.root_directory_first_cluster(), name)
     }
 
     pub fn add_file<P>(&mut self, first_cluster: u32, path: P) -> u32
@@ -305,6 +305,10 @@ impl VirtualExFatBlockDevice {
     /// Size of exFAT volume in bytes
     pub fn volume_size(&self) -> u64 {
         self.volume_length() * (1 << self.bytes_per_sector_shift)
+    }
+
+    pub fn root_directory_first_cluster(&self) -> u32 {
+        self.first_cluster_of_root_directory - 2 // FAT index to heap cluster index
     }
 }
 
