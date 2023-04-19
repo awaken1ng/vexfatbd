@@ -13,6 +13,9 @@ mod utils;
 
 use heap::ClusterHeap;
 
+#[cfg(target_endian = "big")]
+compile_error!("Big-endian not supported");
+
 #[derive(Debug, PartialEq)]
 pub enum ReadError {
     OutOfBounds,
