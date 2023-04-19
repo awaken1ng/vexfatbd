@@ -25,7 +25,7 @@ pub struct VirtualExFatBlockDevice {
     fat_length: u32,
     cluster_heap_offset: u32,
     cluster_count: u32,
-    pub first_cluster_of_root_directory: u32,
+    first_cluster_of_root_directory: u32,
     volume_serial_number: u32,
     bytes_per_sector_shift: u8,
     sectors_per_cluster_shift: u8,
@@ -282,6 +282,10 @@ impl VirtualExFatBlockDevice {
 
     pub fn add_directory(&mut self, root_cluster: u32, file_name: &str) -> u32 {
         self.heap.add_directory(root_cluster, file_name)
+    }
+
+    pub fn add_directory_in_root(&mut self, name: &str) -> u32 {
+        self.heap.add_directory(self.first_cluster_of_root_directory - 2, name)
     }
 
     pub fn add_file<P>(&mut self, first_cluster: u32, path: P) -> u32
