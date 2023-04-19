@@ -167,14 +167,13 @@ impl ClusterHeap {
             for (out, byte) in buffer.iter_mut().zip(sector_data) {
                 *out = byte;
             }
-        }
-        else if let Some(first_cluster) = self.lookup.get(&cluster_index).cloned() {
+        } else if let Some(first_cluster) = self.lookup.get(&cluster_index).cloned() {
             let cluster = self.heap.get_mut(&first_cluster).unwrap();
             let sector = (cluster_index - first_cluster) * self.sectors_per_cluster + sector;
             match &mut cluster.data {
                 ClusterData::DirectoryEntries(entries) => entries.read_sector(sector, buffer),
                 ClusterData::FileMappedData(file) => {
-                    file.read_sector(sector * self.bytes_per_sector, buffer)
+                    file.read_sector(u64::from(sector) * u64::from(self.bytes_per_sector), buffer)
                 }
             }
         }
@@ -240,9 +239,11 @@ impl ClusterHeap {
         );
 
         // allocate space for the file
-        self.lookup.insert(first_data_cluster_index, first_data_cluster_index);
+        self.lookup
+            .insert(first_data_cluster_index, first_data_cluster_index);
         for i in 0..file_size_clusters as u32 {
-            self.lookup.insert(first_data_cluster_index + i, first_data_cluster_index);
+            self.lookup
+                .insert(first_data_cluster_index + i, first_data_cluster_index);
             self.allocation_bitmap.allocate_next_cluster();
         }
 
@@ -303,9 +304,9 @@ struct FileMappedData {
 }
 
 impl FileMappedData {
-    fn read_sector(&mut self, offset: u32, buffer: &mut [u8]) {
+    fn read_sector(&mut self, offset: u64, buffer: &mut [u8]) {
         self.file
-            .seek(std::io::SeekFrom::Start(u64::from(offset)))
+            .seek(std::io::SeekFrom::Start(offset))
             .unwrap();
         let _ = self.file.read(buffer).unwrap();
     }
