@@ -1,4 +1,4 @@
-use std::{path::Path, fs, io::Seek};
+use std::{fs, io::Seek, path::Path};
 
 use arbitrary_int::{u10, u4, u5, u6, u7};
 use bitbybit::bitfield;
@@ -310,11 +310,18 @@ pub fn new_folder(
     Ok(entries)
 }
 
-pub fn new_file<P>(path: P, first_cluster: u32) -> Result<Vec<DirectoryEntry>, FileDirectoryEntryError>
+pub fn new_file<P>(
+    path: P,
+    first_cluster: u32,
+) -> Result<Vec<DirectoryEntry>, FileDirectoryEntryError>
 where
     P: AsRef<Path>,
 {
-    let file_name = path.as_ref().file_name().unwrap_or_default().to_string_lossy();
+    let file_name = path
+        .as_ref()
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
     let name_length: u8 = file_name
         .encode_utf16()
         .count()
@@ -386,8 +393,9 @@ fn name_hash(file_name: &[u16]) -> u16 {
 
     let mut name_hash = 0;
     for byte in bytes {
-        name_hash =
-            (if (name_hash & 1) > 0 { 0x8000 } else { 0 }) + (name_hash >> 1) + u16::from(*byte);
+        name_hash = (if (name_hash & 1) > 0 { 0x8000 } else { 0u16 })
+            .wrapping_add(name_hash >> 1)
+            .wrapping_add(u16::from(*byte));
     }
 
     name_hash
@@ -412,8 +420,11 @@ fn entry_checksum(init_checksum: u16, entry: &[u8], primary: bool) -> u16 {
 
 #[test]
 fn hash() {
-    let string: Vec<u16> = String::from("LOOOOOOOOOOOOOOOOONG")
-        .encode_utf16()
-        .collect();
-    assert_eq!(name_hash(string.as_slice()), 0xA585);
+    let name = "LOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOONG";
+    let utf16: Vec<u16> = name.encode_utf16().collect();
+    assert_eq!(name_hash(utf16.as_slice()), 0x344B);
+
+    let name = "LOOOOOOOOOOOOOOOOONG";
+    let utf16: Vec<u16> = name.encode_utf16().collect();
+    assert_eq!(name_hash(utf16.as_slice()), 0xA585);
 }
