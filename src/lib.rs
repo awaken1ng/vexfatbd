@@ -43,6 +43,8 @@ impl VirtualExFatBlockDevice {
     }
 
     pub fn new_with_serial_number(cluster_count: u32, volume_serial_number: u32) -> Self {
+        assert!(cluster_count % 2 == 0);
+
         let bytes_per_sector_shift = 9; // 512 byte sectors
         let sectors_per_cluster_shift = 3; // 8 sectors, 4096 byte clusters
         let number_of_fats = 1u8;
