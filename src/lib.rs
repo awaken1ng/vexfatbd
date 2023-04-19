@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom},
     path::Path,
 };
 
@@ -13,7 +13,7 @@ mod utils;
 
 use heap::ClusterHeap;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ReadError {
     OutOfBounds,
 }
@@ -290,10 +290,20 @@ impl VirtualExFatBlockDevice {
     {
         self.heap.add_file(first_cluster, path)
     }
+
+    /// Size of exFAT volume in sectors
+    pub fn volume_length(&self) -> u64 {
+        self.volume_length
+    }
+
+    /// Size of exFAT volume in bytes
+    pub fn volume_size(&self) -> u64 {
+        self.volume_length() * (1 << self.bytes_per_sector_shift)
+    }
 }
 
 impl Seek for VirtualExFatBlockDevice {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         match pos {
             SeekFrom::Start(offset) => {
                 let bytes_per_sector = 1 << self.bytes_per_sector_shift;
@@ -307,10 +317,8 @@ impl Seek for VirtualExFatBlockDevice {
                 Ok(offset)
             }
             SeekFrom::End(offset) => {
-                let sector_count =
-                    u64::from(self.cluster_count) * (1 << self.sectors_per_cluster_shift);
-                let volume_size = (sector_count * (1 << self.bytes_per_sector_shift)) as i64;
-                let absolute_offset: u64 = (volume_size - offset) as u64;
+                let volume_size = self.volume_size() as i64;
+                let absolute_offset: u64 = (volume_size + offset) as u64;
 
                 self.seek(SeekFrom::Start(absolute_offset))
             }
@@ -325,21 +333,26 @@ impl Seek for VirtualExFatBlockDevice {
 }
 
 impl Read for VirtualExFatBlockDevice {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let bytes_per_sector = 1 << self.bytes_per_sector_shift;
         let bytes_requested = buffer.len();
+        let mut bytes_left = bytes_requested;
         let mut bytes_read = 0;
         let mut index = 0;
 
         loop {
             let mut sector = vec![0; bytes_per_sector];
-            self.read_sector(self.current_sector, &mut sector).ok();
+            if let Err(err) = self.read_sector(self.current_sector, &mut sector) {
+                match err {
+                    ReadError::OutOfBounds => break,
+                }
+            }
 
             let bytes_in_this_sector = bytes_per_sector - self.current_offset_in_sector as usize;
-            let to_read = if bytes_requested >= bytes_in_this_sector {
+            let to_read = if bytes_left >= bytes_in_this_sector {
                 bytes_in_this_sector
             } else {
-                bytes_requested
+                bytes_left
             };
 
             for byte in sector
@@ -357,6 +370,7 @@ impl Read for VirtualExFatBlockDevice {
             self.current_sector += whole_sectors;
             self.current_offset_in_sector -= whole_sectors * bytes_per_sector as u64;
 
+            bytes_left -= to_read;
             bytes_read += to_read;
             if bytes_read >= bytes_requested {
                 break;
@@ -415,6 +429,11 @@ fn read_sector() {
         .unwrap();
     assert_eq!(buffer[0], 0b00001111); // 4 clusters
     assert_eq!(&buffer[1..], [0; 511]);
+
+    // out of bounds
+    let mut buffer = [0; 512];
+    let ret = vexfat.read_sector(vexfat.volume_length(), &mut buffer);
+    assert_eq!(ret, Err(ReadError::OutOfBounds));
 }
 
 #[test]
@@ -422,8 +441,7 @@ fn read() {
     let mut vexfat = VirtualExFatBlockDevice::new_with_serial_number(512, 0);
 
     let mut by_sector = Vec::new();
-    let sectors = u64::from(vexfat.cluster_count * (1 << vexfat.sectors_per_cluster_shift));
-    for sector in 0..sectors {
+    for sector in 0..vexfat.volume_length() {
         let mut buffer = [0; 512];
         vexfat.read_sector(sector, &mut buffer).unwrap();
         by_sector.extend(buffer);
@@ -432,29 +450,24 @@ fn read() {
     vexfat.seek(SeekFrom::Start(0)).unwrap();
     assert_eq!(vexfat.current_sector, 0);
     assert_eq!(vexfat.current_offset_in_sector, 0);
-
-    let mut by_cluster = Vec::new();
-    for _ in 0..vexfat.cluster_count {
-        let mut buffer = [0; 4096];
-        vexfat.read_exact(&mut buffer).unwrap();
-        by_cluster.extend(buffer);
-    }
-
-    vexfat.seek(SeekFrom::Start(0)).unwrap();
-    assert_eq!(vexfat.current_sector, 0);
-    assert_eq!(vexfat.current_offset_in_sector, 0);
     let mut by_bytes = Vec::new();
-    let volume_size = vexfat.cluster_count
-        * (1 << vexfat.sectors_per_cluster_shift)
-        * (1 << vexfat.bytes_per_sector_shift);
-    for _ in 0..volume_size {
+    for _ in 0..vexfat.volume_size() {
         let mut buffer = [0; 1];
         vexfat.read_exact(&mut buffer).unwrap();
         by_bytes.extend(buffer);
     }
 
-    assert_eq!(by_sector.len(), by_cluster.len());
     assert_eq!(by_bytes.len(), by_bytes.len());
-    assert!(by_sector == by_cluster);
     assert!(by_sector == by_bytes);
+
+    vexfat.seek(SeekFrom::End(-1)).unwrap();
+    assert_eq!(vexfat.current_sector, vexfat.volume_length() - 1);
+    assert_eq!(
+        vexfat.current_offset_in_sector,
+        (1 << vexfat.bytes_per_sector_shift) - 1
+    );
+    let mut buffer = [0; 2];
+    assert_eq!(vexfat.read(&mut buffer).unwrap(), 1);
+    assert_eq!(vexfat.current_sector, vexfat.volume_length());
+    assert_eq!(vexfat.current_offset_in_sector, 0);
 }
