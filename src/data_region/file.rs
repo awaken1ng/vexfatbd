@@ -412,7 +412,9 @@ fn entry_checksum(init_checksum: u16, entry: &[u8], primary: bool) -> u16 {
         }
 
         checksum =
-            (if (checksum & 1) > 0 { 0x8000 } else { 0 }) + (checksum >> 1) + u16::from(byte);
+            (if (checksum & 1) > 0 { 0x8000 } else { 0u16 })
+            .wrapping_add(checksum >> 1)
+            .wrapping_add(u16::from(byte));
     }
 
     checksum
