@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::mem::size_of;
@@ -36,6 +37,19 @@ impl DirectoryEntry {
             DirectoryEntry::File(entry) => entry.as_bytes(),
             DirectoryEntry::StreamExtension(entry) => entry.as_bytes(),
             DirectoryEntry::FileName(entry) => entry.as_bytes(),
+        }
+    }
+}
+
+impl Debug for DirectoryEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VolumeLabel(_) => f.debug_tuple("VolumeLabel").finish(),
+            Self::AllocationBitmap(_) => f.debug_tuple("AllocationBitmap").finish(),
+            Self::UpcaseTable(_) => f.debug_tuple("UpcaseTable").finish(),
+            Self::File(_) => f.debug_tuple("File").finish(),
+            Self::StreamExtension(_) => f.debug_tuple("StreamExtension").finish(),
+            Self::FileName(_) => f.debug_tuple("FileName").finish(),
         }
     }
 }
@@ -299,6 +313,16 @@ impl DirectoryEntries {
     }
 }
 
+impl Debug for DirectoryEntries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectoryEntries")
+            .field("entries", &self.0)
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
+
+#[derive(Debug)]
 struct FileMappedData {
     file: File,
 }
@@ -312,11 +336,13 @@ impl FileMappedData {
     }
 }
 
+#[derive(Debug)]
 enum ClusterData {
     DirectoryEntries(DirectoryEntries),
     FileMappedData(FileMappedData),
 }
 
+#[derive(Debug)]
 struct Cluster {
     data: ClusterData,
 }
