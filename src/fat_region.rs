@@ -2,6 +2,7 @@ use std::mem::size_of;
 
 pub const END_OF_CHAIN: u32 = 0xFFFFFFFF - 2;
 
+#[derive(Debug)]
 pub struct FileAllocationTable {
     first: Vec<u32>,
 }
@@ -41,11 +42,38 @@ impl FileAllocationTable {
 
         self.first[fat_cluster_index] = next_cluster + 2;
     }
+
+    pub fn chain(&self, cluster: u32) -> AllocationChain {
+        AllocationChain {
+            fat: &self.first,
+            index: cluster + 2,
+        }
+    }
+}
+
+pub struct AllocationChain<'a> {
+    fat: &'a [u32],
+    index: u32,
+}
+
+impl<'a> Iterator for AllocationChain<'a> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.index = self.fat.get(self.index as usize).cloned().unwrap_or(0xFFFFFFFF);
+
+        if self.index == 0xFFFFFFFF {
+            None
+        } else {
+            Some(self.index - 2)
+        }
+    }
 }
 
 #[test]
 fn set_cluster() {
     let mut fat = FileAllocationTable::empty();
+    assert_eq!(fat.first, &[0xFFFFFFF8, 0xFFFFFFFF]);
 
     fat.set_cluster(0, END_OF_CHAIN);
     assert_eq!(fat.first, &[0xFFFFFFF8, 0xFFFFFFFF, 0xFFFFFFFF])

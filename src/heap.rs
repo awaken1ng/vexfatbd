@@ -10,9 +10,10 @@ use static_assertions::const_assert;
 
 use crate::data_region::allocation_bitmap::{AllocationBitmap, AllocationBitmapDirectoryEntry};
 use crate::data_region::file::{
-    new_file, new_folder, FileDirectoryEntry, FileNameDirectoryEntry, StreamExtensionDirectoryEntry,
+    entry_checksum, name_hash, FileAttributes, FileDirectoryEntry, FileDirectoryEntryError,
+    FileNameDirectoryEntry, StreamExtensionDirectoryEntry,
 };
-use crate::data_region::upcase_table::{UpcaseTableDirectoryEntry, UPCASE_TABLE};
+use crate::data_region::upcase_table::{upcased_name, UpcaseTableDirectoryEntry, UPCASE_TABLE};
 use crate::data_region::volume_label::VolumeLabelDirectoryEntry;
 use crate::fat_region::{FileAllocationTable, END_OF_CHAIN};
 use crate::utils::{unsigned_rounded_up_div, SliceChain};
@@ -39,6 +40,13 @@ impl DirectoryEntry {
             DirectoryEntry::FileName(entry) => entry.as_bytes(),
         }
     }
+
+    fn as_stream_extension_mut(&mut self) -> Option<&mut StreamExtensionDirectoryEntry> {
+        match self {
+            DirectoryEntry::StreamExtension(se) => Some(se),
+            _ => None,
+        }
+    }
 }
 
 impl Debug for DirectoryEntry {
@@ -48,8 +56,14 @@ impl Debug for DirectoryEntry {
             Self::AllocationBitmap(_) => f.debug_tuple("AllocationBitmap").finish(),
             Self::UpcaseTable(_) => f.debug_tuple("UpcaseTable").finish(),
             Self::File(_) => f.debug_tuple("File").finish(),
-            Self::StreamExtension(_) => f.debug_tuple("StreamExtension").finish(),
-            Self::FileName(_) => f.debug_tuple("FileName").finish(),
+            Self::StreamExtension(e) => f
+                .debug_struct("StreamExtension")
+                .field("cluster", &(e.first_cluster - 2))
+                .finish(),
+            Self::FileName(e) => f
+                .debug_struct("FileName")
+                .field("name", &String::from_utf16_lossy(e.file_name.as_slice()))
+                .finish(),
         }
     }
 }
@@ -71,6 +85,7 @@ pub struct ClusterHeap {
 
     heap: HashMap<u32, Cluster>,
     lookup: HashMap<u32, u32>,
+    directory_parent: HashMap<u32, u32>,
 }
 
 impl ClusterHeap {
@@ -147,6 +162,7 @@ impl ClusterHeap {
 
             heap,
             lookup,
+            directory_parent: HashMap::new(),
         }
     }
 
@@ -197,102 +213,377 @@ impl ClusterHeap {
         self.upcase_table_end_cluster
     }
 
-    fn insert_entries_into_cluster(
-        &mut self,
-        cluster_index: u32,
-        entries: Vec<DirectoryEntry>,
-    ) -> u32 {
-        let cluster = self.heap.entry(cluster_index).or_insert(Cluster {
-            data: ClusterData::DirectoryEntries(DirectoryEntries(Vec::new())),
-        });
-        let cluster_entries = match &mut cluster.data {
-            ClusterData::DirectoryEntries(e) => e,
-            _ => panic!(),
-        };
-        let entries_in_cluster_count = cluster_entries.0.len();
+    fn is_name_in_cluster(&self, cluster_index: u32, upcased_name_hash: u16) -> bool {
+        match self.heap.get(&cluster_index) {
+            Some(cluster) => {
+                if let ClusterData::DirectoryEntries(entries) = &cluster.data {
+                    for entry in entries.0.iter() {
+                        if let DirectoryEntry::StreamExtension(stream_extension) = entry {
+                            if stream_extension.name_hash == upcased_name_hash {
+                                return true;
+                            }
+                        }
+                    }
+                }
 
-        let entries_in_current_cluster = {
-            let cluster_size = self.sectors_per_cluster * self.bytes_per_sector;
-            let max_entries_in_cluster = cluster_size / DirectoryEntry::SIZE as u32;
-            let new_length = (entries_in_cluster_count + entries.len()) as u32;
-            if new_length > max_entries_in_cluster {
-                let entries_in_next_cluster = (max_entries_in_cluster - new_length) as usize;
-
-                entries.len() - entries_in_next_cluster
-            } else {
-                entries.len()
+                false
             }
-        };
-
-        let mut entries = entries.into_iter();
-        for _ in 0..entries_in_current_cluster {
-            let entry = entries.next().unwrap();
-            cluster_entries.0.push(entry);
-        }
-        self.lookup.insert(cluster_index, cluster_index);
-
-        if entries.len() > 0 {
-            assert!(entries.len() <= 128); // FIXME
-            let next_cluster_index = self.allocation_bitmap.allocate_next_cluster();
-            let next_cluster = Cluster {
-                data: ClusterData::DirectoryEntries(DirectoryEntries(entries.collect())),
-            };
-            self.heap.insert(next_cluster_index, next_cluster);
-            self.lookup.insert(next_cluster_index, cluster_index);
-            next_cluster_index
-        } else {
-            cluster_index
+            None => false,
         }
     }
 
-    fn insert_file_into_heap(&mut self, first_data_cluster_index: u32, mut file: File) -> u32 {
-        let file_size_bytes = file.seek(std::io::SeekFrom::End(0)).unwrap();
-        let file_size_clusters = unsigned_rounded_up_div(
-            file_size_bytes,
-            u64::from(self.sectors_per_cluster) * u64::from(self.bytes_per_sector),
-        );
+    fn is_name_in_cluster_chain(&self, root_index: u32, upcased_name_hash: u16) -> bool {
+        if self.is_name_in_cluster(root_index, upcased_name_hash) {
+            true
+        } else {
+            for next_cluster in self.fat.chain(root_index) {
+                if self.is_name_in_cluster(next_cluster, upcased_name_hash) {
+                    return true;
+                }
+            }
 
-        // allocate space for the file
-        self.lookup
-            .insert(first_data_cluster_index, first_data_cluster_index);
-        for i in 0..file_size_clusters as u32 {
-            self.lookup
-                .insert(first_data_cluster_index + i, first_data_cluster_index);
-            self.allocation_bitmap.allocate_next_cluster();
+            false
+        }
+    }
+
+    fn stream_extension_of_directory_mut(
+        &mut self,
+        root_cluster: u32,
+        dir_cluster: u32,
+    ) -> Option<&mut StreamExtensionDirectoryEntry> {
+        let cluster = self.heap.get_mut(&root_cluster)?;
+
+        let entries = match &mut cluster.data {
+            ClusterData::DirectoryEntries(e) => e,
+            _ => return None,
+        };
+
+        for entry in entries.0.iter_mut() {
+            match entry.as_stream_extension_mut() {
+                Some(se) => {
+                    if se.first_cluster - 2 == dir_cluster {
+                        return Some(se);
+                    } else {
+                        continue;
+                    }
+                }
+                None => continue,
+            }
         }
 
+        None
+    }
+
+    /// Add directory into specified root directory, returns first cluster of inserted directory
+    pub fn add_directory(
+        &mut self,
+        root_cluster: u32,
+        name: &str,
+    ) -> Result<u32, FileDirectoryEntryError> {
+        // file name entries
+        let name_length: u8 = name
+            .len()
+            .try_into()
+            .map_err(|_| FileDirectoryEntryError::NameTooLong)?;
+        if name_length == 0 {
+            return Err(FileDirectoryEntryError::EmptyName);
+        }
+        let name_utf16: Vec<_> = name.encode_utf16().collect();
+        let upcased_name = upcased_name(&name_utf16);
+        let name_hash = name_hash(&upcased_name);
+        if self.is_name_in_cluster_chain(root_cluster, name_hash) {
+            return Err(FileDirectoryEntryError::DuplicateName);
+        }
+        let file_name_entries = FileNameDirectoryEntry::new(&name_utf16)?;
+
+        let secondary_count = 1 + file_name_entries.len() as u8; // stream extension entry and 1..=17 file name entries
+
+        // figure out how many entries we can fit into current cluster
+        let cluster_size = self.sectors_per_cluster * self.bytes_per_sector;
+        let max_entries_in_cluster = cluster_size / DirectoryEntry::SIZE as u32;
+
+        let mut end_cluster = self.fat.chain(root_cluster).last().unwrap_or(root_cluster);
+        let mut previous_cluster = end_cluster;
+        let entries_in_cluster = self
+            .heap
+            .entry(end_cluster)
+            .or_insert(Cluster {
+                data: ClusterData::DirectoryEntries(DirectoryEntries(Vec::new())),
+            })
+            .as_entries()
+            .unwrap()
+            .len() as u32;
+
+        let entries_to_insert = 1 + u32::from(secondary_count);
+        let entries_to_insert_in_new_cluster =
+            entries_to_insert.saturating_sub(max_entries_in_cluster - entries_in_cluster);
+        let entries_to_insert_in_this_cluster =
+            entries_to_insert.saturating_sub(entries_to_insert_in_new_cluster);
+
+        if entries_to_insert_in_new_cluster > 0 {
+            // new entires will not fit into current last cluster, allocate a new one
+            previous_cluster = end_cluster;
+            end_cluster = self.allocation_bitmap.allocate_next_cluster();
+            self.heap.insert(
+                end_cluster,
+                Cluster {
+                    data: ClusterData::DirectoryEntries(DirectoryEntries(Vec::new())),
+                },
+            );
+            self.fat.set_cluster(previous_cluster, end_cluster);
+            self.fat.set_cluster(end_cluster, END_OF_CHAIN);
+            self.lookup.insert(end_cluster, end_cluster);
+        }
+
+        // stream extension entry
+        let directory_cluster = self.allocation_bitmap.allocate_next_cluster();
+        let mut stream_extension_entry = StreamExtensionDirectoryEntry::default();
+        stream_extension_entry.name_length = name_length;
+        stream_extension_entry.name_hash = name_hash;
+        stream_extension_entry.first_cluster = directory_cluster + 2; // FAT index
+        stream_extension_entry.data_length = u64::from(cluster_size); // empty directory is 1 cluster big
+        stream_extension_entry.valid_data_length = stream_extension_entry.data_length;
+        self.directory_parent
+            .insert(directory_cluster, root_cluster);
+        self.lookup.insert(directory_cluster, directory_cluster);
+        assert!(self
+            .heap
+            .insert(
+                directory_cluster,
+                Cluster {
+                    data: ClusterData::DirectoryEntries(DirectoryEntries(Vec::new())),
+                }
+            )
+            .is_none());
+
+        // file entry
+        let mut file_entry = FileDirectoryEntry::new_directory();
+        file_entry.secondary_count = secondary_count;
+        file_entry.set_checksum = {
+            let mut checksum = entry_checksum(0, bytemuck::bytes_of(&file_entry), true);
+            checksum = entry_checksum(checksum, bytemuck::bytes_of(&stream_extension_entry), false);
+            for file_name_entry in &file_name_entries {
+                checksum = entry_checksum(checksum, bytemuck::bytes_of(file_name_entry), false);
+            }
+
+            checksum
+        };
+
+        // insert entries into cluster(s)
+        let mut entries = vec![
+            DirectoryEntry::File(file_entry),
+            DirectoryEntry::StreamExtension(stream_extension_entry),
+        ];
+        entries.extend(file_name_entries.into_iter().map(DirectoryEntry::FileName));
+
+        let mut entries = entries.into_iter();
+        let cluster = self
+            .heap
+            .get_mut(&previous_cluster)
+            .unwrap()
+            .as_entries_mut()
+            .unwrap();
+        for _ in 0..entries_to_insert_in_this_cluster {
+            let entry = entries.next().unwrap();
+            cluster.push(entry);
+        }
+
+        if entries.len() > 0 {
+            let cluster = self
+                .heap
+                .get_mut(&end_cluster)
+                .unwrap()
+                .as_entries_mut()
+                .unwrap();
+            for _ in 0..entries_to_insert_in_new_cluster {
+                let entry = entries.next().unwrap();
+                cluster.push(entry);
+            }
+
+            // if root_cluster != self.root_directory_cluster() {
+            //     let parent_cluster = self.directory_parent.get(&root_cluster).cloned().unwrap();
+            //     let parent_stream_ext = self.stream_extension_of_directory_mut(parent_cluster, root_cluster).unwrap();
+            //     parent_stream_ext.general_secondary_flags = parent_stream_ext.general_secondary_flags.with_no_fat_chain(false);
+            //     parent_stream_ext.data_length += u64::from(cluster_size);
+            //     parent_stream_ext.valid_data_length = parent_stream_ext.data_length;
+            // }
+
+            assert_eq!(entries.len(), 0);
+        }
+
+        Ok(directory_cluster)
+    }
+
+    pub fn map_file_with_name<P>(
+        &mut self,
+        dir_cluster: u32,
+        path: P,
+        name: &str,
+    ) -> Result<u32, FileDirectoryEntryError>
+    where
+        P: AsRef<Path>,
+    {
+        // file name entries
+        let name_length: u8 = name
+            .len()
+            .try_into()
+            .map_err(|_| FileDirectoryEntryError::NameTooLong)?;
+        if name_length == 0 {
+            return Err(FileDirectoryEntryError::EmptyName);
+        }
+        let name_utf16: Vec<_> = name.encode_utf16().collect();
+        let upcased_name = upcased_name(&name_utf16);
+        let name_hash = name_hash(&upcased_name);
+        if self.is_name_in_cluster_chain(dir_cluster, name_hash) {
+            return Err(FileDirectoryEntryError::DuplicateName);
+        }
+        let file_name_entries = FileNameDirectoryEntry::new(&name_utf16)?;
+
+        let secondary_count = 1 + file_name_entries.len() as u8; // stream extension entry and 1..=17 file name entries
+
+        // figure out how many entries we can fit into current cluster
+        let cluster_size = self.sectors_per_cluster * self.bytes_per_sector;
+        let max_entries_in_cluster = cluster_size / DirectoryEntry::SIZE as u32;
+
+        let mut end_dir_cluster = self.fat.chain(dir_cluster).last().unwrap_or(dir_cluster);
+        let mut previous_dir_cluster = end_dir_cluster;
+        let entries_in_cluster = self
+            .heap
+            .entry(end_dir_cluster)
+            .or_insert(Cluster {
+                data: ClusterData::DirectoryEntries(DirectoryEntries(Vec::new())),
+            })
+            .as_entries()
+            .unwrap()
+            .len() as u32;
+
+        let entries_to_insert = 1 + u32::from(secondary_count);
+        let entries_to_insert_in_new_cluster =
+            entries_to_insert.saturating_sub(max_entries_in_cluster - entries_in_cluster);
+        let entries_to_insert_in_this_cluster =
+            entries_to_insert.saturating_sub(entries_to_insert_in_new_cluster);
+
+        if entries_to_insert_in_new_cluster > 0 {
+            // new entires will not fit into current last cluster, allocate a new one
+            previous_dir_cluster = end_dir_cluster;
+            end_dir_cluster = self.allocation_bitmap.allocate_next_cluster();
+            self.heap.insert(
+                end_dir_cluster,
+                Cluster {
+                    data: ClusterData::DirectoryEntries(DirectoryEntries(Vec::new())),
+                },
+            );
+            self.fat.set_cluster(previous_dir_cluster, end_dir_cluster);
+            self.fat.set_cluster(end_dir_cluster, END_OF_CHAIN);
+            self.lookup.insert(end_dir_cluster, end_dir_cluster);
+        }
+
+        // stream extension entry
+        let mut file = File::open(&path).unwrap();
+        let file_size_bytes = file.seek(std::io::SeekFrom::End(0)).unwrap();
+
+        let file_cluster = self.allocation_bitmap.allocate_next_cluster();
+        let mut stream_extension_entry = StreamExtensionDirectoryEntry::default();
+        stream_extension_entry.name_length = name_length;
+        stream_extension_entry.name_hash = name_hash;
+        stream_extension_entry.first_cluster = file_cluster + 2; // FAT index
+        stream_extension_entry.data_length = file_size_bytes;
+        stream_extension_entry.valid_data_length = stream_extension_entry.data_length;
+        self.lookup.insert(file_cluster, file_cluster);
+
+        // file entry
+        let mut file_entry = FileDirectoryEntry::new_file();
+        file_entry.secondary_count = secondary_count;
+        file_entry.set_checksum = {
+            let mut checksum = entry_checksum(0, bytemuck::bytes_of(&file_entry), true);
+            checksum = entry_checksum(checksum, bytemuck::bytes_of(&stream_extension_entry), false);
+            for file_name_entry in &file_name_entries {
+                checksum = entry_checksum(checksum, bytemuck::bytes_of(file_name_entry), false);
+            }
+
+            checksum
+        };
+        file_entry.file_attributes = FileAttributes::new_with_raw_value(0).with_read_only(true);
+
+        // insert entries into cluster(s)
+        let mut entries = vec![
+            DirectoryEntry::File(file_entry),
+            DirectoryEntry::StreamExtension(stream_extension_entry),
+        ];
+        entries.extend(file_name_entries.into_iter().map(DirectoryEntry::FileName));
+
+        let mut entries = entries.into_iter();
+        let cluster = self
+            .heap
+            .get_mut(&previous_dir_cluster)
+            .unwrap()
+            .as_entries_mut()
+            .unwrap();
+        for _ in 0..entries_to_insert_in_this_cluster {
+            let entry = entries.next().unwrap();
+            cluster.push(entry);
+        }
+
+        if entries.len() > 0 {
+            let cluster = self
+                .heap
+                .get_mut(&end_dir_cluster)
+                .unwrap()
+                .as_entries_mut()
+                .unwrap();
+            for _ in 0..entries_to_insert_in_new_cluster {
+                let entry = entries.next().unwrap();
+                cluster.push(entry);
+            }
+
+            // if dir_cluster != self.root_directory_cluster() {
+            //     let parent_cluster = self.directory_parent.get(&dir_cluster).cloned().unwrap();
+            //     let parent_stream_ext = self.stream_extension_of_directory_mut(parent_cluster, dir_cluster).unwrap();
+            //     parent_stream_ext.general_secondary_flags = parent_stream_ext.general_secondary_flags.with_no_fat_chain(false);
+            //     parent_stream_ext.data_length += u64::from(cluster_size);
+            //     parent_stream_ext.valid_data_length = parent_stream_ext.data_length;
+            // }
+
+            assert_eq!(entries.len(), 0);
+        }
+
+        // allocate space for the file
+        let file_size_clusters = unsigned_rounded_up_div(file_size_bytes, u64::from(cluster_size));
+        for i in 1..file_size_clusters as u32 {
+            self.lookup.insert(file_cluster + i, file_cluster);
+            assert_eq!(
+                file_cluster + i,
+                self.allocation_bitmap.allocate_next_cluster()
+            );
+        }
+
+        // insert file into heap
         self.heap.insert(
-            first_data_cluster_index,
+            file_cluster,
             Cluster {
                 data: ClusterData::FileMappedData(FileMappedData { file }),
             },
         );
 
-        first_data_cluster_index + file_size_clusters as u32
+        Ok(file_cluster)
     }
 
-    pub fn add_directory(&mut self, root_cluster: u32, file_name: &str) -> u32 {
-        let fat_cluster = root_cluster + 2;
-
-        // empty directory is going to take up 1 cluster of space
-        let cluster_size = self.sectors_per_cluster * self.bytes_per_sector;
-        let entries = new_folder(file_name, fat_cluster + 1, u64::from(cluster_size)).unwrap();
-        let end_cluster = self.insert_entries_into_cluster(root_cluster, entries);
-        end_cluster + 1
-    }
-
-    pub fn add_file<P>(&mut self, first_cluster: u32, path: P) -> u32
+    /// Map file into specified directory, returns first cluster of inserted file
+    pub fn map_file<P>(&mut self, dir_cluster: u32, path: P) -> Result<u32, FileDirectoryEntryError>
     where
         P: AsRef<Path>,
     {
-        let fat_cluster = first_cluster + 2;
+        let path = path.as_ref();
 
-        let entries = new_file(&path, fat_cluster + 1).unwrap();
-        let entry_end_cluster = self.insert_entries_into_cluster(first_cluster, entries);
+        let name = path
+            .file_name()
+            .ok_or(FileDirectoryEntryError::EmptyName)?
+            .to_string_lossy();
 
-        let file = std::fs::File::open(path).unwrap();
-        let data_end_cluster = self.insert_file_into_heap(entry_end_cluster + 1, file);
-        data_end_cluster + 1
+        let ret = self.map_file_with_name(dir_cluster, path, &name);
+        dbg!(&self.heap);
+
+        ret
     }
 }
 
@@ -329,9 +620,7 @@ struct FileMappedData {
 
 impl FileMappedData {
     fn read_sector(&mut self, offset: u64, buffer: &mut [u8]) {
-        self.file
-            .seek(std::io::SeekFrom::Start(offset))
-            .unwrap();
+        self.file.seek(std::io::SeekFrom::Start(offset)).unwrap();
         let _ = self.file.read(buffer).unwrap();
     }
 }
@@ -347,16 +636,35 @@ struct Cluster {
     data: ClusterData,
 }
 
+impl Cluster {
+    fn as_entries(&self) -> Option<&[DirectoryEntry]> {
+        match &self.data {
+            ClusterData::DirectoryEntries(entries) => Some(&entries.0),
+            ClusterData::FileMappedData(_) => None,
+        }
+    }
+
+    fn as_entries_mut(&mut self) -> Option<&mut Vec<DirectoryEntry>> {
+        match &mut self.data {
+            ClusterData::DirectoryEntries(entries) => Some(&mut entries.0),
+            ClusterData::FileMappedData(_) => None,
+        }
+    }
+}
+
 #[test]
 fn heap_read() {
     const BYTES_PER_SECTOR: usize = 512;
     let mut heap = ClusterHeap::new(BYTES_PER_SECTOR as _, 8, 512);
-    heap.add_directory(heap.root_directory_cluster(), "hello world");
+    assert_eq!(
+        heap.add_directory(heap.root_directory_cluster(), "hello world"),
+        Ok(4)
+    );
 
     // allocation bitmap
     let mut buffer = [0; BYTES_PER_SECTOR];
     heap.read_sector_in_cluster(heap.allocation_bitmap_start_cluster, 0, &mut buffer);
-    assert_eq!(buffer[0], 0b00001111); // 4 clusters
+    assert_eq!(buffer[0], 0b00011111); // 5 clusters
     assert_eq!(&buffer[1..], [0; BYTES_PER_SECTOR - 1]);
 
     // upcase table
@@ -413,4 +721,82 @@ fn heap_read() {
     let mut buffer = [0; BYTES_PER_SECTOR];
     heap.read_sector_in_cluster(heap.upcase_table_end_cluster, 0, &mut buffer);
     assert_eq!(&buffer[..32], VolumeLabelDirectoryEntry::empty().as_bytes());
+}
+
+#[test]
+fn name_duplication() {
+    let mut heap = ClusterHeap::new(512, 8, 512);
+    let root_cluster = heap.root_directory_cluster();
+    assert!(heap.add_directory(root_cluster, "name").is_ok());
+    assert_eq!(
+        heap.add_directory(root_cluster, "name"),
+        Err(FileDirectoryEntryError::DuplicateName)
+    );
+}
+
+#[test]
+fn fragmentation() {
+    fn long_name(offset: usize) -> String {
+        let mut name = String::new();
+
+        name.push('L');
+        for _ in 0..253 - offset {
+            name.push('O');
+        }
+        name.push('G');
+
+        name
+    }
+
+    // with 512 byte sectors, and 8 sectors per cluster, each cluster is 4096 bytes
+    // each entry is 32 bytes, so single cluster fits 128 entries at most
+    let mut heap = ClusterHeap::new(512, 8, 512); // 3 default entries
+    let root_cluster = heap
+        .add_directory(heap.root_directory_cluster(), "subroot")
+        .unwrap();
+    assert_eq!(root_cluster, 4);
+
+    assert_eq!(heap.add_directory(root_cluster, &long_name(0)), Ok(5)); // 22 entries
+    assert_eq!(heap.add_directory(root_cluster, &long_name(1)), Ok(6)); // 41
+    assert_eq!(heap.add_directory(root_cluster, &long_name(2)), Ok(7)); // 60
+    assert_eq!(heap.add_directory(root_cluster, &long_name(3)), Ok(8)); // 79
+    assert_eq!(heap.add_directory(root_cluster, &long_name(4)), Ok(9)); // 98
+    assert_eq!(heap.add_directory(root_cluster, &long_name(5)), Ok(10)); // 117
+    let mut heap_keys: Vec<_> = heap.heap.keys().cloned().collect();
+    let mut lookup_keys: Vec<_> = heap.lookup.keys().cloned().collect();
+    heap_keys.sort_unstable();
+    lookup_keys.sort_unstable();
+    assert_eq!(heap_keys, [3, 4]);
+    assert_eq!(lookup_keys, [3, 4, 5, 6, 7, 8, 9, 10]);
+    assert_eq!(heap.fat.chain(root_cluster).next(), None);
+
+    assert_eq!(heap.add_directory(root_cluster, &long_name(6)), Ok(12)); // 136
+    let mut heap_keys: Vec<_> = heap.heap.keys().cloned().collect();
+    let mut lookup_keys: Vec<_> = heap.lookup.keys().cloned().collect();
+    heap_keys.sort_unstable();
+    lookup_keys.sort_unstable();
+    assert_eq!(heap_keys, [3, 4, 11]);
+    assert_eq!(lookup_keys, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert_eq!(heap.fat.chain(root_cluster).next(), Some(11));
+
+    let cluster = heap.heap.get(&root_cluster).unwrap();
+    let entries = cluster.as_entries().unwrap();
+    let mut first_clusters = entries.iter().filter_map(|e| match e {
+        DirectoryEntry::StreamExtension(se) => Some(se.first_cluster - 2),
+        _ => None,
+    });
+    assert_eq!(first_clusters.next(), Some(5));
+    assert_eq!(first_clusters.next(), Some(6));
+    assert_eq!(first_clusters.next(), Some(7));
+    assert_eq!(first_clusters.next(), Some(8));
+    assert_eq!(first_clusters.next(), Some(9));
+    assert_eq!(first_clusters.next(), Some(10));
+    assert_eq!(first_clusters.next(), Some(12));
+    assert_eq!(first_clusters.next(), None);
+
+    // let se = heap
+    //     .stream_extension_of_directory_mut(heap.root_directory_cluster(), root_cluster)
+    //     .unwrap();
+    // assert!(!se.general_secondary_flags.no_fat_chain());
+    // assert_eq!(se.data_length, 8192);
 }

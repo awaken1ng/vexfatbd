@@ -1,17 +1,12 @@
-use std::{fs, io::Seek, path::Path};
-
 use arbitrary_int::{u10, u4, u5, u6, u7};
 use bitbybit::bitfield;
 use bytemuck::{Pod, Zeroable};
-use itertools::Itertools;
-
-use crate::{data_region::upcase_table::upcased_file_name, heap::DirectoryEntry};
 
 use super::{EntryType, GeneralPrimaryFlags};
 
 #[bitfield(u16)]
 #[derive(Zeroable, Pod)]
-struct FileAttributes {
+pub struct FileAttributes {
     #[bit(0, rw)]
     read_only: bool,
 
@@ -108,9 +103,9 @@ struct UtcOffset {
 #[repr(C)]
 pub struct FileDirectoryEntry {
     entry_type: EntryType,
-    secondary_count: u8,
-    set_checksum: u16,
-    file_attributes: FileAttributes,
+    pub secondary_count: u8,
+    pub set_checksum: u16,
+    pub file_attributes: FileAttributes,
     reserved_1: u16,
     create_timestamp: u32,
     last_modified_timestamp: u32,
@@ -124,19 +119,46 @@ pub struct FileDirectoryEntry {
 }
 
 impl FileDirectoryEntry {
+    pub fn new_file() -> Self {
+        Self {
+            entry_type: EntryType::new_with_raw_value(0)
+                .with_type_code(u5::new(5))
+                .with_in_use(true), // 0x85
+            secondary_count: Default::default(),
+            set_checksum: 0,
+            file_attributes: FileAttributes::new_with_raw_value(0).with_read_only(true),
+            reserved_1: 0,
+            create_timestamp: 0,
+            last_modified_timestamp: 0,
+            last_accessed_timestamp: 0,
+            create_10ms_increment: 0,
+            last_modified_10ms_increment: 0,
+            create_utc_offset: 0,
+            last_modified_utc_offset: 0,
+            last_accessed_utc_offset: 0,
+            reserved_2: [0; 7],
+        }
+    }
+
+    pub fn new_directory() -> Self {
+        let mut ret = Self::new_file();
+        ret.file_attributes = ret.file_attributes.with_directory(true);
+        ret
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         bytemuck::bytes_of(self)
     }
 }
 
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Debug, Clone, Copy, Zeroable, Pod)]
 #[repr(C)]
-pub struct StreamExtensionDirectoryEntry {
+pub struct  StreamExtensionDirectoryEntry {
     entry_type: EntryType,
-    general_secondary_flags: GeneralPrimaryFlags,
+    pub general_secondary_flags: GeneralPrimaryFlags,
     reserved_1: u8,
-    name_length: u8,
-    name_hash: u16,
+    pub name_length: u8,
+    pub name_hash: u16,
     reserved_2: u16,
 
     /// The `valid_data_length` field shall describe how far into the data stream user data has been written.
@@ -148,7 +170,7 @@ pub struct StreamExtensionDirectoryEntry {
     /// Otherwise, the range of valid values for this field shall be:
     /// - At least 0, which means no user data has been written out to the data stream
     /// - At most `data_length`, which means user data has been written out to the entire length of the data stream
-    valid_data_length: u64,
+    pub valid_data_length: u64,
 
     reserved_3: u32,
 
@@ -164,13 +186,13 @@ pub struct StreamExtensionDirectoryEntry {
     /// If the `no_fat_chain` bit is 1 then `first_cluster` must point to a valid cluster in the cluster heap.
     ///
     /// This field shall contain the index of the first cluster of the data stream, which hosts the user data.
-    first_cluster: u32, // FAT index
+    pub first_cluster: u32, // FAT index
 
     /// The `data_length` field shall conform to the definition provided in the Generic Secondary DirectoryEntry template (see Section 6.4.4).
     ///
     /// If the corresponding File directory entry describes a directory, then the valid value for this field is the entire size of the associated allocation, in bytes, which may be 0.
     /// Further, for directories, the maximum value for this field is 256MB.
-    data_length: u64,
+    pub data_length: u64,
 }
 
 impl StreamExtensionDirectoryEntry {
@@ -179,240 +201,100 @@ impl StreamExtensionDirectoryEntry {
     }
 }
 
+impl Default for StreamExtensionDirectoryEntry {
+    fn default() -> Self {
+        Self {
+            entry_type: EntryType::new_with_raw_value(0)
+                .with_type_category(true)
+                .with_in_use(true), // 0xC0
+            general_secondary_flags: GeneralPrimaryFlags::new_with_raw_value(0)
+                .with_allocation_possible(true)
+                .with_no_fat_chain(true),
+            reserved_1: 0,
+            name_length: 0,
+            name_hash: 0,
+            reserved_2: 0,
+            valid_data_length: 0,
+            reserved_3: 0,
+            first_cluster: 0,
+            data_length: 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Zeroable, Pod)]
 #[repr(C)]
 pub struct FileNameDirectoryEntry {
     entry_type: EntryType,
     general_secondary_flags: GeneralPrimaryFlags,
-    file_name: [u16; 15],
+    pub file_name: [u16; 15],
 }
 
 impl FileNameDirectoryEntry {
+    pub fn new(name: &[u16]) -> Result<Vec<Self>, FileDirectoryEntryError> {
+        let contains_illegal_chars = name.iter().any(|ch| {
+            matches!(
+                ch,
+                0x00..=0x1F | 0x22 | 0x2A | 0x2F | 0x3A | 0x3C | 0x3E | 0x3F | 0x5C | 0x7C
+            )
+        });
+        if contains_illegal_chars {
+            return Err(FileDirectoryEntryError::IllegalCharactersInName);
+        }
+
+        let mut entries = Vec::new();
+        for chunk in name.chunks(15) {
+            let mut entry = Self::default();
+            for (out, char) in entry.file_name.iter_mut().zip(chunk.iter().cloned()) {
+                *out = char
+            }
+
+            entries.push(entry);
+        }
+
+        Ok(entries)
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         bytemuck::bytes_of(self)
     }
 }
 
-#[derive(Debug)]
-pub enum FileDirectoryEntryError {
-    NameTooLong,
-    IllegalCharactersInName,
-}
-
-fn new_file_name_entry(
-    file_name: &str,
-) -> Result<Vec<FileNameDirectoryEntry>, FileDirectoryEntryError> {
-    let contains_illegal_chars = file_name.chars().any(|ch| {
-        matches!(
-            ch,
-            '\0'..='\x1F'
-                | '\x22'
-                | '\x2A'
-                | '\x2F'
-                | '\x3A'
-                | '\x3C'
-                | '\x3E'
-                | '\x3F'
-                | '\x5C'
-                | '\x7C'
-        )
-    });
-    if contains_illegal_chars {
-        return Err(FileDirectoryEntryError::IllegalCharactersInName);
-    }
-
-    let mut file_name_entries = Vec::new();
-    for chunk in file_name.encode_utf16().chunks(15).into_iter() {
-        let mut entry = FileNameDirectoryEntry {
+impl Default for FileNameDirectoryEntry {
+    fn default() -> Self {
+        Self {
             entry_type: EntryType::new_with_raw_value(0)
                 .with_type_code(u5::new(1))
                 .with_type_category(true)
                 .with_in_use(true), // 0xC1
             general_secondary_flags: GeneralPrimaryFlags::new_with_raw_value(0),
             file_name: [0; 15],
-        };
-
-        for (out, char) in entry.file_name.iter_mut().zip(chunk) {
-            *out = char;
         }
-
-        file_name_entries.push(entry);
     }
-
-    Ok(file_name_entries)
 }
 
-pub fn new_folder(
-    file_name: &str,
-    first_cluster: u32,
-    cluster_size: u64,
-) -> Result<Vec<DirectoryEntry>, FileDirectoryEntryError> {
-    let name_length: u8 = file_name
-        .encode_utf16()
-        .count()
-        .try_into()
-        .map_err(|_| FileDirectoryEntryError::NameTooLong)?;
-
-    let upcased_name = upcased_file_name(file_name);
-    let name_hash = name_hash(&upcased_name);
-
-    let file_name_entries = new_file_name_entry(file_name)?;
-
-    let stream_extension_entry = StreamExtensionDirectoryEntry {
-        entry_type: EntryType::new_with_raw_value(0)
-            .with_type_category(true)
-            .with_in_use(true), // 0xC0
-        general_secondary_flags: GeneralPrimaryFlags::new_with_raw_value(0)
-            .with_allocation_possible(true)
-            .with_no_fat_chain(true),
-        reserved_1: 0,
-        name_length,
-        name_hash,
-        reserved_2: 0,
-        valid_data_length: cluster_size,
-        reserved_3: 0,
-        first_cluster,
-        data_length: cluster_size,
-    };
-
-    let mut file_entry = FileDirectoryEntry {
-        entry_type: EntryType::new_with_raw_value(0)
-            .with_type_code(u5::new(5))
-            .with_in_use(true), // 0x85
-        secondary_count: 1 + file_name_entries.len() as u8,
-        set_checksum: 0, // set later
-        file_attributes: FileAttributes::new_with_raw_value(0).with_directory(true),
-        reserved_1: 0,
-        create_timestamp: 0,             // TODO
-        last_modified_timestamp: 0,      // TODO
-        last_accessed_timestamp: 0,      // TODO
-        create_10ms_increment: 0,        // TODO
-        last_modified_10ms_increment: 0, // TODO
-        create_utc_offset: 0,            // TODO
-        last_modified_utc_offset: 0,     // TODO
-        last_accessed_utc_offset: 0,     // TODO
-        reserved_2: [0; 7],
-    };
-
-    let mut checksum = entry_checksum(0, bytemuck::bytes_of(&file_entry), true);
-    checksum = entry_checksum(checksum, bytemuck::bytes_of(&stream_extension_entry), false);
-    for file_name_entry in &file_name_entries {
-        checksum = entry_checksum(checksum, bytemuck::bytes_of(file_name_entry), false);
-    }
-    file_entry.set_checksum = checksum;
-
-    let mut entries = vec![
-        DirectoryEntry::File(file_entry),
-        DirectoryEntry::StreamExtension(stream_extension_entry),
-    ];
-    entries.extend(file_name_entries.into_iter().map(DirectoryEntry::FileName));
-
-    Ok(entries)
+#[derive(Debug, PartialEq)]
+pub enum FileDirectoryEntryError {
+    EmptyName,
+    NameTooLong,
+    DuplicateName,
+    IllegalCharactersInName,
 }
 
-pub fn new_file<P>(
-    path: P,
-    first_cluster: u32,
-) -> Result<Vec<DirectoryEntry>, FileDirectoryEntryError>
-where
-    P: AsRef<Path>,
-{
-    let file_name = path
-        .as_ref()
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
-    let name_length: u8 = file_name
-        .encode_utf16()
-        .count()
-        .try_into()
-        .map_err(|_| FileDirectoryEntryError::NameTooLong)?;
-
-    let upcased_name = upcased_file_name(&file_name);
-    let name_hash = name_hash(&upcased_name);
-
-    let file_name_entries = new_file_name_entry(&file_name)?;
-
-    let mut file = fs::File::open(path).unwrap();
-    let file_size = file.seek(std::io::SeekFrom::End(0)).unwrap();
-
-    let stream_extension_entry = StreamExtensionDirectoryEntry {
-        entry_type: EntryType::new_with_raw_value(0)
-            .with_type_category(true)
-            .with_in_use(true), // 0xC0
-        general_secondary_flags: GeneralPrimaryFlags::new_with_raw_value(0)
-            .with_allocation_possible(true)
-            .with_no_fat_chain(true),
-        reserved_1: 0,
-        name_length,
-        name_hash,
-        reserved_2: 0,
-        valid_data_length: file_size,
-        reserved_3: 0,
-        first_cluster,
-        data_length: file_size,
-    };
-
-    let mut file_entry = FileDirectoryEntry {
-        entry_type: EntryType::new_with_raw_value(0)
-            .with_type_code(u5::new(5))
-            .with_in_use(true), // 0x85
-        secondary_count: 1 + file_name_entries.len() as u8,
-        set_checksum: 0, // set later
-        file_attributes: FileAttributes::new_with_raw_value(0).with_read_only(true),
-        reserved_1: 0,
-        create_timestamp: 0,             // TODO
-        last_modified_timestamp: 0,      // TODO
-        last_accessed_timestamp: 0,      // TODO
-        create_10ms_increment: 0,        // TODO
-        last_modified_10ms_increment: 0, // TODO
-        create_utc_offset: 0,            // TODO
-        last_modified_utc_offset: 0,     // TODO
-        last_accessed_utc_offset: 0,     // TODO
-        reserved_2: [0; 7],
-    };
-
-    let mut checksum = entry_checksum(0, bytemuck::bytes_of(&file_entry), true);
-    checksum = entry_checksum(checksum, bytemuck::bytes_of(&stream_extension_entry), false);
-    for file_name_entry in &file_name_entries {
-        checksum = entry_checksum(checksum, bytemuck::bytes_of(file_name_entry), false);
-    }
-    file_entry.set_checksum = checksum;
-
-    let mut entries = vec![
-        DirectoryEntry::File(file_entry),
-        DirectoryEntry::StreamExtension(stream_extension_entry),
-    ];
-    entries.extend(file_name_entries.into_iter().map(DirectoryEntry::FileName));
-
-    Ok(entries)
-}
-
-fn name_hash(file_name: &[u16]) -> u16 {
+pub fn name_hash(file_name: &[u16]) -> u16 {
     let bytes: &[u8] = bytemuck::cast_slice(file_name);
-
-    let mut name_hash = 0;
-    for byte in bytes {
-        name_hash = (if (name_hash & 1) > 0 { 0x8000 } else { 0u16 })
-            .wrapping_add(name_hash >> 1)
-            .wrapping_add(u16::from(*byte));
-    }
-
-    name_hash
+    entry_checksum(0, bytes, false)
 }
 
-fn entry_checksum(init_checksum: u16, entry: &[u8], primary: bool) -> u16 {
-    assert_eq!(entry.len(), 32);
-
+pub fn entry_checksum(init_checksum: u16, data: &[u8], primary: bool) -> u16 {
     let mut checksum = init_checksum;
-    for (index, byte) in entry.iter().cloned().enumerate() {
+    for (index, byte) in data.iter().cloned().enumerate() {
         // skip itself, `set_checksum` field
         if primary && (index == 2 || index == 3) {
             continue;
         }
 
-        checksum =
-            (if (checksum & 1) > 0 { 0x8000 } else { 0u16 })
+        checksum = (if (checksum & 1) > 0 { 0x8000 } else { 0u16 })
             .wrapping_add(checksum >> 1)
             .wrapping_add(u16::from(byte));
     }

@@ -11,6 +11,7 @@ mod fat_region;
 mod heap;
 mod utils;
 
+use data_region::file::FileDirectoryEntryError;
 use heap::ClusterHeap;
 
 #[cfg(target_endian = "big")]
@@ -285,19 +286,29 @@ impl VirtualExFatBlockDevice {
         }
     }
 
-    pub fn add_directory(&mut self, root_cluster: u32, file_name: &str) -> u32 {
-        self.heap.add_directory(root_cluster, file_name)
+    /// Add directory into specified root directory, returns first cluster of inserted directory
+    pub fn add_directory(&mut self, root_cluster: u32, name: &str) -> Result<u32, FileDirectoryEntryError> {
+        self.heap.add_directory(root_cluster, name)
     }
 
-    pub fn add_directory_in_root(&mut self, name: &str) -> u32 {
-        self.heap.add_directory(self.root_directory_first_cluster(), name)
+    pub fn add_directory_in_root(&mut self, name: &str) -> Result<u32, FileDirectoryEntryError> {
+        dbg!(self.root_directory_cluster());
+        self.add_directory(self.root_directory_cluster(), name)
     }
 
-    pub fn add_file<P>(&mut self, first_cluster: u32, path: P) -> u32
+    /// Map file into specified directory, returns first cluster of inserted file
+    pub fn map_file<P>(&mut self, dir_cluster: u32, path: P) -> Result<u32, FileDirectoryEntryError>
     where
         P: AsRef<Path>,
     {
-        self.heap.add_file(first_cluster, path)
+        self.heap.map_file(dir_cluster, path)
+    }
+
+    pub fn map_file_with_name<P>(&mut self, dir_cluster: u32, path: P, name: &str) -> Result<u32, FileDirectoryEntryError>
+    where
+        P: AsRef<Path>,
+    {
+        self.heap.map_file_with_name(dir_cluster, path, name)
     }
 
     /// Size of exFAT volume in sectors
@@ -310,7 +321,7 @@ impl VirtualExFatBlockDevice {
         self.volume_length() * (1 << self.bytes_per_sector_shift)
     }
 
-    pub fn root_directory_first_cluster(&self) -> u32 {
+    pub fn root_directory_cluster(&self) -> u32 {
         self.first_cluster_of_root_directory - 2 // FAT index to heap cluster index
     }
 }
@@ -399,7 +410,7 @@ fn read_sector() {
     use crate::data_region::volume_label::VolumeLabelDirectoryEntry;
 
     // 4 KiB clusters, 4 TiB - 3 clusters (2 reserved by FAT, 1 used during rounding) volume
-    let mut vexfat = VirtualExFatBlockDevice::new(1073741824 - 3);
+    let mut vexfat = VirtualExFatBlockDevice::new(1073741824 - 4);
 
     let mut buffer = [0; 512];
     vexfat
@@ -483,4 +494,32 @@ fn read() {
     assert_eq!(vexfat.read(&mut buffer).unwrap(), 1);
     assert_eq!(vexfat.current_sector, vexfat.volume_length());
     assert_eq!(vexfat.current_offset_in_sector, 0);
+}
+
+#[test]
+fn file() {
+    let cargo_manifest_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+    let cargo_manifest = std::fs::read(&cargo_manifest_path).unwrap();
+
+    let mut vexfat = VirtualExFatBlockDevice::new_with_serial_number(512, 0);
+    let dir_cluster = vexfat.add_directory_in_root("dir").unwrap();
+    let file_cluster = vexfat.map_file(dir_cluster, cargo_manifest_path).unwrap();
+    assert_eq!(dir_cluster, 4);
+    assert_eq!(file_cluster, 5);
+
+    let mut buffer = [0; 512];
+    vexfat
+        .read_sector(vexfat.cluster_heap_offset.into(), &mut buffer)
+        .unwrap();
+    assert_eq!(buffer[0], 0b00111111); // 6 clusters
+    assert_eq!(&buffer[1..], [0; 511]);
+
+    // let file_cluster = 5;
+    let heap_offest = vexfat.cluster_heap_offset * (1 << vexfat.bytes_per_sector_shift);
+    let offset = heap_offest + (file_cluster * (1 << vexfat.bytes_per_sector_shift) * (1 << vexfat.sectors_per_cluster_shift));
+    vexfat.seek(SeekFrom::Start(offset as _)).unwrap();
+
+    let mut buffer = vec![0; cargo_manifest.len()];
+    vexfat.read_exact(&mut buffer).unwrap();
+    assert_eq!(cargo_manifest, buffer);
 }
