@@ -153,7 +153,7 @@ impl FileDirectoryEntry {
 
 #[derive(Debug, Clone, Copy, Zeroable, Pod)]
 #[repr(C)]
-pub struct  StreamExtensionDirectoryEntry {
+pub struct StreamExtensionDirectoryEntry {
     entry_type: EntryType,
     pub general_secondary_flags: GeneralPrimaryFlags,
     reserved_1: u8,

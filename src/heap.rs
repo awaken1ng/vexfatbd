@@ -40,13 +40,6 @@ impl DirectoryEntry {
             DirectoryEntry::FileName(entry) => entry.as_bytes(),
         }
     }
-
-    fn as_stream_extension_mut(&mut self) -> Option<&mut StreamExtensionDirectoryEntry> {
-        match self {
-            DirectoryEntry::StreamExtension(se) => Some(se),
-            _ => None,
-        }
-    }
 }
 
 impl Debug for DirectoryEntry {
@@ -246,32 +239,144 @@ impl ClusterHeap {
         }
     }
 
-    fn stream_extension_of_directory_mut(
-        &mut self,
-        root_cluster: u32,
-        dir_cluster: u32,
-    ) -> Option<&mut StreamExtensionDirectoryEntry> {
-        let cluster = self.heap.get_mut(&root_cluster)?;
+    fn increase_parent_directory_size(&mut self, dir_cluster: u32) {
+        if dir_cluster == self.root_directory_cluster() {
+            return;
+        }
 
-        let entries = match &mut cluster.data {
-            ClusterData::DirectoryEntries(e) => e,
-            _ => return None,
-        };
+        let parent_cluster = self.directory_parent.get(&dir_cluster).cloned().unwrap();
+        let cluster_chain: Vec<u32> = [parent_cluster]
+            .into_iter()
+            .chain(self.fat.chain(parent_cluster))
+            .collect();
 
-        for entry in entries.0.iter_mut() {
-            match entry.as_stream_extension_mut() {
-                Some(se) => {
-                    if se.first_cluster - 2 == dir_cluster {
-                        return Some(se);
-                    } else {
-                        continue;
+        // look for stream extension entry, keep track of file entry while doing so
+        let mut file_entry_pos = None;
+        let mut stream_ext_pos = None;
+        let mut file_name_entries_count = 0;
+
+        'outer: for (cluster_idx, cluster_id) in cluster_chain.iter().cloned().enumerate() {
+            let cluster = self.heap.get_mut(&cluster_id).unwrap();
+            for (entry_idx, entry) in cluster.as_entries_mut().unwrap().iter_mut().enumerate() {
+                match entry {
+                    DirectoryEntry::File(file_entry) => {
+                        file_entry_pos = Some((cluster_idx, entry_idx));
+
+                        file_name_entries_count = file_entry.secondary_count - 1;
                     }
+                    DirectoryEntry::StreamExtension(stream_ext) => {
+                        // FAT index
+                        if stream_ext.first_cluster != dir_cluster + 2 {
+                            continue;
+                        }
+
+                        stream_ext_pos = Some((cluster_idx, entry_idx));
+
+                        // update length and flags in stream in extension
+                        let cluster_size = self.sectors_per_cluster * self.bytes_per_sector;
+
+                        stream_ext.general_secondary_flags =
+                            stream_ext.general_secondary_flags.with_no_fat_chain(false);
+                        stream_ext.data_length += u64::from(cluster_size);
+                        stream_ext.valid_data_length = stream_ext.data_length;
+
+                        break 'outer;
+                    }
+                    _ => continue,
                 }
-                None => continue,
             }
         }
 
-        None
+        let (stream_ext_chain_idx, stream_ext_entry_idx) = stream_ext_pos.unwrap();
+        let (file_chain_idx, file_entry_idx) = file_entry_pos.unwrap();
+
+        // calculate the checksum
+        let mut checksum = 0;
+
+        {
+            let cluster_id = cluster_chain[stream_ext_chain_idx];
+            let cluster = self.heap.get(&cluster_id).unwrap();
+            let entry = cluster
+                .as_entries()
+                .unwrap()
+                .get(stream_ext_entry_idx)
+                .unwrap();
+            match entry {
+                DirectoryEntry::StreamExtension(se_entry) => {
+                    dbg!(se_entry);
+                    checksum = entry_checksum(checksum, bytemuck::bytes_of(se_entry), false);
+                }
+                _ => panic!("expected stream extension entry, got {entry:?}"),
+            }
+        }
+
+        {
+            let cluster_id = cluster_chain[stream_ext_chain_idx];
+            let cluster = self.heap.get(&cluster_id).unwrap();
+
+            let mut entries_found = 0;
+
+            for entry in cluster
+                .as_entries()
+                .unwrap()
+                .iter()
+                .skip(stream_ext_entry_idx + 1)
+                .take(usize::from(file_name_entries_count))
+            {
+                match entry {
+                    DirectoryEntry::FileName(file_name_entry) => {
+                        checksum =
+                            entry_checksum(checksum, bytemuck::bytes_of(file_name_entry), false);
+                        entries_found += 1;
+                    }
+                    _ => panic!("expeced file name entry, got {entry:?}"),
+                }
+            }
+
+            let remaining_entries = file_name_entries_count - entries_found;
+            if remaining_entries > 0 {
+                let cluster_id = cluster_chain[stream_ext_chain_idx + 1];
+                let cluster = self.heap.get(&cluster_id).unwrap();
+
+                for entry in cluster
+                    .as_entries()
+                    .unwrap()
+                    .iter()
+                    .take(usize::from(remaining_entries))
+                {
+                    match entry {
+                        DirectoryEntry::FileName(file_name_entry) => {
+                            checksum = entry_checksum(
+                                checksum,
+                                bytemuck::bytes_of(file_name_entry),
+                                false,
+                            );
+                            entries_found += 1;
+                        }
+                        _ => panic!("expeced file name entry, got {entry:?}"),
+                    }
+                }
+            }
+
+            assert_eq!(entries_found, file_name_entries_count);
+        }
+
+        // update the checksum
+        {
+            let cluster_id = cluster_chain[file_chain_idx];
+            let cluster = self.heap.get_mut(&cluster_id).unwrap();
+            let entry = cluster
+                .as_entries_mut()
+                .unwrap()
+                .get_mut(file_entry_idx)
+                .unwrap();
+            match entry {
+                DirectoryEntry::File(file_entry) => {
+                    file_entry.set_checksum = checksum;
+                }
+                _ => panic!("expected file entry, got {entry:?}"),
+            }
+        }
     }
 
     /// Add directory into specified root directory, returns first cluster of inserted directory
@@ -333,6 +438,7 @@ impl ClusterHeap {
             self.fat.set_cluster(previous_cluster, end_cluster);
             self.fat.set_cluster(end_cluster, END_OF_CHAIN);
             self.lookup.insert(end_cluster, end_cluster);
+            self.increase_parent_directory_size(root_cluster);
         }
 
         // stream extension entry
@@ -399,14 +505,6 @@ impl ClusterHeap {
                 let entry = entries.next().unwrap();
                 cluster.push(entry);
             }
-
-            // if root_cluster != self.root_directory_cluster() {
-            //     let parent_cluster = self.directory_parent.get(&root_cluster).cloned().unwrap();
-            //     let parent_stream_ext = self.stream_extension_of_directory_mut(parent_cluster, root_cluster).unwrap();
-            //     parent_stream_ext.general_secondary_flags = parent_stream_ext.general_secondary_flags.with_no_fat_chain(false);
-            //     parent_stream_ext.data_length += u64::from(cluster_size);
-            //     parent_stream_ext.valid_data_length = parent_stream_ext.data_length;
-            // }
 
             assert_eq!(entries.len(), 0);
         }
@@ -476,6 +574,7 @@ impl ClusterHeap {
             self.fat.set_cluster(previous_dir_cluster, end_dir_cluster);
             self.fat.set_cluster(end_dir_cluster, END_OF_CHAIN);
             self.lookup.insert(end_dir_cluster, end_dir_cluster);
+            self.increase_parent_directory_size(dir_cluster);
         }
 
         // stream extension entry
@@ -536,14 +635,6 @@ impl ClusterHeap {
                 cluster.push(entry);
             }
 
-            // if dir_cluster != self.root_directory_cluster() {
-            //     let parent_cluster = self.directory_parent.get(&dir_cluster).cloned().unwrap();
-            //     let parent_stream_ext = self.stream_extension_of_directory_mut(parent_cluster, dir_cluster).unwrap();
-            //     parent_stream_ext.general_secondary_flags = parent_stream_ext.general_secondary_flags.with_no_fat_chain(false);
-            //     parent_stream_ext.data_length += u64::from(cluster_size);
-            //     parent_stream_ext.valid_data_length = parent_stream_ext.data_length;
-            // }
-
             assert_eq!(entries.len(), 0);
         }
 
@@ -580,10 +671,7 @@ impl ClusterHeap {
             .ok_or(FileDirectoryEntryError::EmptyName)?
             .to_string_lossy();
 
-        let ret = self.map_file_with_name(dir_cluster, path, &name);
-        dbg!(&self.heap);
-
-        ret
+        self.map_file_with_name(dir_cluster, path, &name)
     }
 }
 
@@ -766,7 +854,7 @@ fn fragmentation() {
     let mut lookup_keys: Vec<_> = heap.lookup.keys().cloned().collect();
     heap_keys.sort_unstable();
     lookup_keys.sort_unstable();
-    assert_eq!(heap_keys, [3, 4]);
+    assert_eq!(heap_keys, [3, 4, 5, 6, 7, 8, 9, 10]);
     assert_eq!(lookup_keys, [3, 4, 5, 6, 7, 8, 9, 10]);
     assert_eq!(heap.fat.chain(root_cluster).next(), None);
 
@@ -775,7 +863,7 @@ fn fragmentation() {
     let mut lookup_keys: Vec<_> = heap.lookup.keys().cloned().collect();
     heap_keys.sort_unstable();
     lookup_keys.sort_unstable();
-    assert_eq!(heap_keys, [3, 4, 11]);
+    assert_eq!(heap_keys, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     assert_eq!(lookup_keys, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     assert_eq!(heap.fat.chain(root_cluster).next(), Some(11));
 
@@ -793,10 +881,4 @@ fn fragmentation() {
     assert_eq!(first_clusters.next(), Some(10));
     assert_eq!(first_clusters.next(), Some(12));
     assert_eq!(first_clusters.next(), None);
-
-    // let se = heap
-    //     .stream_extension_of_directory_mut(heap.root_directory_cluster(), root_cluster)
-    //     .unwrap();
-    // assert!(!se.general_secondary_flags.no_fat_chain());
-    // assert_eq!(se.data_length, 8192);
 }
