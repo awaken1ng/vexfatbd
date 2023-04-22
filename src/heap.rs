@@ -253,16 +253,13 @@ impl ClusterHeap {
         // look for stream extension entry, keep track of file entry while doing so
         let mut file_entry_pos = None;
         let mut stream_ext_pos = None;
-        let mut file_name_entries_count = 0;
 
         'outer: for (cluster_idx, cluster_id) in cluster_chain.iter().cloned().enumerate() {
             let cluster = self.heap.get_mut(&cluster_id).unwrap();
             for (entry_idx, entry) in cluster.as_entries_mut().unwrap().iter_mut().enumerate() {
                 match entry {
-                    DirectoryEntry::File(file_entry) => {
+                    DirectoryEntry::File(_) => {
                         file_entry_pos = Some((cluster_idx, entry_idx));
-
-                        file_name_entries_count = file_entry.secondary_count - 1;
                     }
                     DirectoryEntry::StreamExtension(stream_ext) => {
                         // FAT index
@@ -290,8 +287,27 @@ impl ClusterHeap {
         let (stream_ext_chain_idx, stream_ext_entry_idx) = stream_ext_pos.unwrap();
         let (file_chain_idx, file_entry_idx) = file_entry_pos.unwrap();
 
+        let file_name_entries_count;
+
         // calculate the checksum
         let mut checksum = 0;
+
+        {
+            let cluster_id = cluster_chain[file_chain_idx];
+            let cluster = self.heap.get(&cluster_id).unwrap();
+            let entry = cluster
+                .as_entries()
+                .unwrap()
+                .get(file_entry_idx)
+                .unwrap();
+            match entry {
+                DirectoryEntry::File(file) => {
+                    file_name_entries_count = file.secondary_count - 1;
+                    checksum = entry_checksum(checksum, bytemuck::bytes_of(file), true);
+                }
+                _ => panic!("expected file entry, got {entry:?}"),
+            }
+        }
 
         {
             let cluster_id = cluster_chain[stream_ext_chain_idx];
@@ -302,9 +318,8 @@ impl ClusterHeap {
                 .get(stream_ext_entry_idx)
                 .unwrap();
             match entry {
-                DirectoryEntry::StreamExtension(se_entry) => {
-                    dbg!(se_entry);
-                    checksum = entry_checksum(checksum, bytemuck::bytes_of(se_entry), false);
+                DirectoryEntry::StreamExtension(stream_ext) => {
+                    checksum = entry_checksum(checksum, bytemuck::bytes_of(stream_ext), false);
                 }
                 _ => panic!("expected stream extension entry, got {entry:?}"),
             }

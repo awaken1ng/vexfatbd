@@ -62,7 +62,7 @@ impl<'a> Iterator for AllocationChain<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         self.index = self.fat.get(self.index as usize).cloned().unwrap_or(0xFFFFFFFF);
 
-        if self.index == 0xFFFFFFFF {
+        if self.index == 0xFFFFFFFF || self.index == 0 {
             None
         } else {
             Some(self.index - 2)
