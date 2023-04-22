@@ -295,11 +295,7 @@ impl ClusterHeap {
         {
             let cluster_id = cluster_chain[file_chain_idx];
             let cluster = self.heap.get(&cluster_id).unwrap();
-            let entry = cluster
-                .as_entries()
-                .unwrap()
-                .get(file_entry_idx)
-                .unwrap();
+            let entry = cluster.as_entries().unwrap().get(file_entry_idx).unwrap();
             match entry {
                 DirectoryEntry::File(file) => {
                     file_name_entries_count = file.secondary_count - 1;
@@ -443,7 +439,10 @@ impl ClusterHeap {
         if entries_to_insert_in_new_cluster > 0 {
             // new entires will not fit into current last cluster, allocate a new one
             previous_cluster = end_cluster;
-            end_cluster = self.allocation_bitmap.allocate_next_cluster();
+            end_cluster = self
+                .allocation_bitmap
+                .allocate_next_cluster()
+                .ok_or(FileDirectoryEntryError::OutOfFreeSpace)?;
             self.heap.insert(
                 end_cluster,
                 Cluster {
@@ -457,7 +456,10 @@ impl ClusterHeap {
         }
 
         // stream extension entry
-        let directory_cluster = self.allocation_bitmap.allocate_next_cluster();
+        let directory_cluster = self
+            .allocation_bitmap
+            .allocate_next_cluster()
+            .ok_or(FileDirectoryEntryError::OutOfFreeSpace)?;
         let mut stream_extension_entry = StreamExtensionDirectoryEntry::default();
         stream_extension_entry.name_length = name_length;
         stream_extension_entry.name_hash = name_hash;
@@ -584,7 +586,10 @@ impl ClusterHeap {
         if entries_to_insert_in_new_cluster > 0 {
             // new entires will not fit into current last cluster, allocate a new one
             previous_dir_cluster = end_dir_cluster;
-            end_dir_cluster = self.allocation_bitmap.allocate_next_cluster();
+            end_dir_cluster = self
+                .allocation_bitmap
+                .allocate_next_cluster()
+                .ok_or(FileDirectoryEntryError::OutOfFreeSpace)?;
             self.heap.insert(
                 end_dir_cluster,
                 Cluster {
@@ -598,7 +603,10 @@ impl ClusterHeap {
         }
 
         // stream extension entry
-        let file_cluster = self.allocation_bitmap.allocate_next_cluster();
+        let file_cluster = self
+            .allocation_bitmap
+            .allocate_next_cluster()
+            .ok_or(FileDirectoryEntryError::OutOfFreeSpace)?;
         let mut stream_extension_entry = StreamExtensionDirectoryEntry::default();
         stream_extension_entry.name_length = name_length;
         stream_extension_entry.name_hash = name_hash;
@@ -661,7 +669,9 @@ impl ClusterHeap {
             self.lookup.insert(file_cluster + i, file_cluster);
             assert_eq!(
                 file_cluster + i,
-                self.allocation_bitmap.allocate_next_cluster()
+                self.allocation_bitmap
+                    .allocate_next_cluster()
+                    .ok_or(FileDirectoryEntryError::OutOfFreeSpace)?
             );
         }
 

@@ -71,10 +71,15 @@ impl AllocationBitmap {
         (all_but_last_eight + last_eight).try_into().unwrap()
     }
 
-    pub fn allocate_next_cluster(&mut self) -> u32 {
+    pub fn allocate_next_cluster(&mut self) -> Option<u32> {
         let next_cluster = self.allocated_clusters_count();
-        self.set_cluster(next_cluster, true);
-        next_cluster
+
+        if next_cluster == self.cluster_count {
+            None
+        } else {
+            self.set_cluster(next_cluster, true);
+            Some(next_cluster)
+        }
     }
 }
 
@@ -98,6 +103,21 @@ fn allocation_bitmap() {
 
     bitmap.allocate_next_cluster();
     assert_eq!(&bitmap.data, &[0b11111111, 0b00000001]);
+}
+
+#[test]
+fn out_of_memory() {
+    let mut bitmap = AllocationBitmap::new(8);
+
+    assert_eq!(bitmap.allocate_next_cluster(), Some(0));
+    assert_eq!(bitmap.allocate_next_cluster(), Some(1));
+    assert_eq!(bitmap.allocate_next_cluster(), Some(2));
+    assert_eq!(bitmap.allocate_next_cluster(), Some(3));
+    assert_eq!(bitmap.allocate_next_cluster(), Some(4));
+    assert_eq!(bitmap.allocate_next_cluster(), Some(5));
+    assert_eq!(bitmap.allocate_next_cluster(), Some(6));
+    assert_eq!(bitmap.allocate_next_cluster(), Some(7));
+    assert_eq!(bitmap.allocate_next_cluster(), None);
 }
 
 #[bitfield(u8)]

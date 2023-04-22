@@ -282,6 +282,7 @@ pub enum FileDirectoryEntryError {
     DuplicateName,
     IllegalCharactersInName,
     IoError(io::Error),
+    OutOfFreeSpace,
 }
 
 impl PartialEq for FileDirectoryEntryError {
