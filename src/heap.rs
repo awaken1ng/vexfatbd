@@ -537,6 +537,11 @@ impl ClusterHeap {
         }
         let file_name_entries = FileNameDirectoryEntry::new(&name_utf16)?;
 
+        let mut file = File::open(&path).map_err(FileDirectoryEntryError::IoError)?;
+        let file_size_bytes = file
+            .seek(std::io::SeekFrom::End(0))
+            .map_err(FileDirectoryEntryError::IoError)?;
+
         let secondary_count = 1 + file_name_entries.len() as u8; // stream extension entry and 1..=17 file name entries
 
         // figure out how many entries we can fit into current cluster
@@ -578,9 +583,6 @@ impl ClusterHeap {
         }
 
         // stream extension entry
-        let mut file = File::open(&path).unwrap();
-        let file_size_bytes = file.seek(std::io::SeekFrom::End(0)).unwrap();
-
         let file_cluster = self.allocation_bitmap.allocate_next_cluster();
         let mut stream_extension_entry = StreamExtensionDirectoryEntry::default();
         stream_extension_entry.name_length = name_length;

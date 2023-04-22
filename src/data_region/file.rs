@@ -1,3 +1,5 @@
+use std::io;
+
 use arbitrary_int::{u10, u4, u5, u6, u7};
 use bitbybit::bitfield;
 use bytemuck::{Pod, Zeroable};
@@ -273,12 +275,22 @@ impl Default for FileNameDirectoryEntry {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum FileDirectoryEntryError {
     EmptyName,
     NameTooLong,
     DuplicateName,
     IllegalCharactersInName,
+    IoError(io::Error),
+}
+
+impl PartialEq for FileDirectoryEntryError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::IoError(l0), Self::IoError(r0)) => l0.kind() == r0.kind(),
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
 }
 
 pub fn name_hash(file_name: &[u16]) -> u16 {
