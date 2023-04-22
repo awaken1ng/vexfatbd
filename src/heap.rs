@@ -664,7 +664,11 @@ impl ClusterHeap {
         }
 
         // allocate space for the file
-        let file_size_clusters = unsigned_rounded_up_div(file_size_bytes, u64::from(cluster_size));
+        let file_size_clusters = if file_size_bytes > 1 {
+            unsigned_rounded_up_div(file_size_bytes, u64::from(cluster_size))
+        } else {
+            1
+        };
         for i in 1..file_size_clusters as u32 {
             self.lookup.insert(file_cluster + i, file_cluster);
             assert_eq!(
