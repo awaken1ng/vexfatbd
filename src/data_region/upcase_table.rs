@@ -237,7 +237,7 @@ pub const UPCASE_TABLE: [u16; 2918] = [
     0xfffc, 0xfffd, 0xfffe, 0xffff,
 ];
 
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct UpcaseTableDirectoryEntry {
     entry_type: EntryType,

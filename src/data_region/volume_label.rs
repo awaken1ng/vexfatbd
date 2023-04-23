@@ -3,7 +3,7 @@ use bytemuck::{Zeroable, Pod};
 
 use super::EntryType;
 
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct VolumeLabelDirectoryEntry {
     entry_type: EntryType,

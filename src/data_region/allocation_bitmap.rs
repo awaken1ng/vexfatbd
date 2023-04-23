@@ -135,7 +135,7 @@ fn out_of_memory() {
 }
 
 #[bitfield(u8)]
-#[derive(Zeroable, Pod)]
+#[derive(Zeroable, Pod, PartialEq)]
 pub struct BitmapFlags {
     #[bit(0, rw)]
     is_second_fat: bool,
@@ -144,7 +144,7 @@ pub struct BitmapFlags {
     reserved: u7,
 }
 
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct AllocationBitmapDirectoryEntry {
     entry_type: EntryType,

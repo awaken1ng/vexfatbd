@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use super::{EntryType, GeneralPrimaryFlags};
 
 #[bitfield(u16)]
-#[derive(Zeroable, Pod)]
+#[derive(Zeroable, Pod, PartialEq)]
 pub struct FileAttributes {
     #[bit(0, rw)]
     read_only: bool,
@@ -101,7 +101,7 @@ struct UtcOffset {
     offset_valid: bool,
 }
 
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct FileDirectoryEntry {
     entry_type: EntryType,
@@ -153,7 +153,7 @@ impl FileDirectoryEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, Zeroable, Pod)]
+#[derive(Debug, Clone, Copy, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct StreamExtensionDirectoryEntry {
     entry_type: EntryType,
@@ -224,7 +224,7 @@ impl Default for StreamExtensionDirectoryEntry {
     }
 }
 
-#[derive(Clone, Copy, Zeroable, Pod)]
+#[derive(Clone, Copy, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct FileNameDirectoryEntry {
     entry_type: EntryType,

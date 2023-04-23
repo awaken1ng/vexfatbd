@@ -18,6 +18,7 @@ use crate::data_region::volume_label::VolumeLabelDirectoryEntry;
 use crate::fat_region::{FileAllocationTable, END_OF_CHAIN};
 use crate::utils::{unsigned_rounded_up_div, SliceChain};
 
+#[derive(PartialEq)]
 pub enum DirectoryEntry {
     VolumeLabel(VolumeLabelDirectoryEntry),
     AllocationBitmap(AllocationBitmapDirectoryEntry),

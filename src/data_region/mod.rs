@@ -8,7 +8,7 @@ pub mod upcase_table;
 pub mod volume_label;
 
 #[bitfield(u8)]
-#[derive(Debug, Zeroable, Pod)]
+#[derive(Debug, Zeroable, Pod, PartialEq)]
 struct EntryType {
     /// The `TypeCode` field partially describes the specific type of the given directory entry.
     /// This field, plus the `TypeImportance` and `TypeCategory` fields (see Section 6.2.1.2 and Section 6.2.1.3, respectively)
@@ -46,7 +46,7 @@ struct EntryType {
 }
 
 #[bitfield(u8)]
-#[derive(Debug, Zeroable, Pod)]
+#[derive(Debug, Zeroable, Pod, PartialEq)]
 pub struct GeneralPrimaryFlags {
     /// The `allocation_possible` field shall describe whether or not an allocation in the Cluster Heap is possible for the given directory entry.
     ///
