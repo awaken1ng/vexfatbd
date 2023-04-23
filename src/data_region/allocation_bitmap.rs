@@ -53,6 +53,20 @@ impl AllocationBitmap {
         }
     }
 
+    pub fn write_sector(&mut self, sector: u32, buffer: &[u8]) {
+        let bytes_per_sector = buffer.len();
+        let bytes_to_skip = sector as usize * bytes_per_sector;
+        let sector_data = self
+            .data
+            .iter_mut()
+            .skip(bytes_to_skip)
+            .take(bytes_per_sector);
+
+        for (new, byte) in buffer.iter().cloned().zip(sector_data) {
+            *byte = new;
+        }
+    }
+
     fn allocated_clusters_count(&self) -> u32 {
         let all_but_last_eight = self.data.len().saturating_sub(1) * 8;
         let last_eight = match self.data.last().cloned().unwrap_or_default() {
