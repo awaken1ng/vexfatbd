@@ -32,6 +32,19 @@ impl FileAllocationTable {
         self.read_sector(fat_sector, buffer, &self.first);
     }
 
+    pub fn write_sector_first(&mut self, fat_sector: u64, buffer: &[u8]) {
+        let entries_per_sector = buffer.len() / size_of::<u32>();
+        let buffer: &[u32] = bytemuck::cast_slice(buffer);
+
+        for (new, fat_entry) in buffer.iter().cloned().zip(
+            self.first.iter_mut()
+                .skip(fat_sector as usize * entries_per_sector)
+                .take(entries_per_sector)
+        ) {
+            *fat_entry = new;
+        }
+    }
+
     pub fn set_cluster(&mut self, cluster_index: u32, next_cluster: u32) {
         let fat_cluster_index = (cluster_index + 2) as usize;
 
