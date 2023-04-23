@@ -108,7 +108,7 @@ pub struct FileDirectoryEntry {
     pub secondary_count: u8,
     pub set_checksum: u16,
     pub file_attributes: FileAttributes,
-    reserved_1: u16,
+    pub reserved_1: u16,
     create_timestamp: u32,
     last_modified_timestamp: u32,
     last_accessed_timestamp: u32,
@@ -117,7 +117,7 @@ pub struct FileDirectoryEntry {
     create_utc_offset: u8,
     last_modified_utc_offset: u8,
     last_accessed_utc_offset: u8,
-    reserved_2: [u8; 7],
+    pub reserved_2: [u8; 7],
 }
 
 impl FileDirectoryEntry {
@@ -158,10 +158,10 @@ impl FileDirectoryEntry {
 pub struct StreamExtensionDirectoryEntry {
     entry_type: EntryType,
     pub general_secondary_flags: GeneralPrimaryFlags,
-    reserved_1: u8,
+    pub reserved_1: u8,
     pub name_length: u8,
     pub name_hash: u16,
-    reserved_2: u16,
+    pub reserved_2: u16,
 
     /// The `valid_data_length` field shall describe how far into the data stream user data has been written.
     /// Implementations shall update this field as they write data further out into the data stream.
@@ -174,7 +174,7 @@ pub struct StreamExtensionDirectoryEntry {
     /// - At most `data_length`, which means user data has been written out to the entire length of the data stream
     pub valid_data_length: u64,
 
-    reserved_3: u32,
+    pub reserved_3: u32,
 
     /// The FirstCluster field shall contain the index of the first cluster of an allocation in the Cluster Heap associated with the given directory entry.
     ///
@@ -228,18 +228,13 @@ impl Default for StreamExtensionDirectoryEntry {
 #[repr(C)]
 pub struct FileNameDirectoryEntry {
     entry_type: EntryType,
-    general_secondary_flags: GeneralPrimaryFlags,
+    pub general_secondary_flags: GeneralPrimaryFlags,
     pub file_name: [u16; 15],
 }
 
 impl FileNameDirectoryEntry {
     pub fn new(name: &[u16]) -> Result<Vec<Self>, FileDirectoryEntryError> {
-        let contains_illegal_chars = name.iter().any(|ch| {
-            matches!(
-                ch,
-                0x00..=0x1F | 0x22 | 0x2A | 0x2F | 0x3A | 0x3C | 0x3E | 0x3F | 0x5C | 0x7C
-            )
-        });
+        let contains_illegal_chars = name.iter().cloned().any(is_illegal_file_name_character);
         if contains_illegal_chars {
             return Err(FileDirectoryEntryError::IllegalCharactersInName);
         }
@@ -273,6 +268,13 @@ impl Default for FileNameDirectoryEntry {
             file_name: [0; 15],
         }
     }
+}
+
+pub fn is_illegal_file_name_character(ch: u16) -> bool {
+    matches!(
+        ch,
+        0x00..=0x1F | 0x22 | 0x2A | 0x2F | 0x3A | 0x3C | 0x3E | 0x3F | 0x5C | 0x7C
+    )
 }
 
 #[derive(Debug)]

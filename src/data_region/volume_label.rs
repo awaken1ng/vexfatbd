@@ -7,9 +7,9 @@ use super::EntryType;
 #[repr(C)]
 pub struct VolumeLabelDirectoryEntry {
     entry_type: EntryType,
-    character_count: u8,
-    volume_label: [u8; 22],
-    reserved: [u8; 8],
+    pub character_count: u8,
+    pub volume_label: [u16; 11],
+    pub reserved: [u8; 8],
 }
 
 impl VolumeLabelDirectoryEntry {

@@ -10,8 +10,8 @@ use static_assertions::const_assert;
 
 use crate::data_region::allocation_bitmap::{AllocationBitmap, AllocationBitmapDirectoryEntry};
 use crate::data_region::file::{
-    entry_checksum, name_hash, FileAttributes, FileDirectoryEntry, FileDirectoryEntryError,
-    FileNameDirectoryEntry, StreamExtensionDirectoryEntry,
+    entry_checksum, is_illegal_file_name_character, name_hash, FileAttributes, FileDirectoryEntry,
+    FileDirectoryEntryError, FileNameDirectoryEntry, StreamExtensionDirectoryEntry,
 };
 use crate::data_region::upcase_table::{upcased_name, UpcaseTableDirectoryEntry, UPCASE_TABLE};
 use crate::data_region::volume_label::VolumeLabelDirectoryEntry;
@@ -29,6 +29,96 @@ pub enum DirectoryEntry {
 
 impl DirectoryEntry {
     const SIZE: usize = 32;
+
+    fn new_from_bytes(buffer: &[u8]) -> Option<Self> {
+        assert_eq!(buffer.len(), 32);
+
+        match buffer[0] {
+            0x81 => {
+                let entry: &AllocationBitmapDirectoryEntry = bytemuck::from_bytes(buffer);
+
+                if entry.bitmap_flags.reserved().value() != 0 || entry.reserved != [0; 18] {
+                    return None;
+                }
+
+                Some(Self::AllocationBitmap(*entry))
+            }
+            0x82 => {
+                let entry: &UpcaseTableDirectoryEntry = bytemuck::from_bytes(buffer);
+
+                if entry.reserved_1 != [0; 3] || entry.reserved_2 != [0; 12] {
+                    return None;
+                }
+
+                Some(Self::UpcaseTable(*entry))
+            }
+            0x83 => {
+                let entry: &VolumeLabelDirectoryEntry = bytemuck::from_bytes(buffer);
+
+                if entry.character_count > 11 || entry.reserved != [0; 8] {
+                    return None;
+                }
+
+                let contains_illegal_chars: bool = entry
+                    .volume_label
+                    .iter()
+                    .cloned()
+                    .any(is_illegal_file_name_character);
+                if contains_illegal_chars {
+                    return None;
+                }
+
+                Some(Self::VolumeLabel(*entry))
+            }
+            0x85 => {
+                let entry: &FileDirectoryEntry = bytemuck::from_bytes(buffer);
+
+                if entry.secondary_count < 2
+                    || entry.secondary_count > 18
+                    || entry.file_attributes.reserved_1()
+                    || entry.file_attributes.reserved_2().value() != 0
+                    || entry.reserved_1 != 0
+                    || entry.reserved_2 != [0; 7]
+                {
+                    return None;
+                }
+
+                Some(Self::File(*entry))
+            }
+            0xC0 => {
+                let entry: &StreamExtensionDirectoryEntry = bytemuck::from_bytes(buffer);
+
+                if entry.general_secondary_flags.custom_defined().value() > 0
+                    || entry.reserved_1 != 0
+                    || entry.reserved_2 != 0
+                    || entry.reserved_3 != 0
+                {
+                    return None;
+                }
+
+                Some(Self::StreamExtension(*entry))
+            }
+            0xC1 => {
+                let entry: &FileNameDirectoryEntry = bytemuck::from_bytes(buffer);
+
+                if entry.general_secondary_flags.raw_value() != 0 {
+                    return None;
+                }
+
+                let contains_illegal_chars: bool = entry
+                    .file_name
+                    .iter()
+                    .cloned()
+                    .any(is_illegal_file_name_character);
+                if contains_illegal_chars {
+                    return None;
+                }
+
+                Some(Self::FileName(*entry))
+            }
+            _ => None,
+        }
+    }
 
     fn as_bytes(&self) -> &[u8] {
         match self {

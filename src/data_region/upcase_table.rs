@@ -241,9 +241,9 @@ pub const UPCASE_TABLE: [u16; 2918] = [
 #[repr(C)]
 pub struct UpcaseTableDirectoryEntry {
     entry_type: EntryType,
-    reserved_1: [u8; 3],
+    pub reserved_1: [u8; 3],
     table_checksum: u32,
-    reserved_2: [u8; 12],
+    pub reserved_2: [u8; 12],
     first_cluster: u32,
     data_length: u64,
 }
