@@ -149,7 +149,7 @@ pub struct ClusterHeap {
     upcase_table_end_cluster: u32,
 
     heap: HashMap<u32, Cluster>,
-    lookup: HashMap<u32, u32>,
+    cluster_lookup: HashMap<u32, u32>,
     directory_parent: HashMap<u32, u32>,
 }
 
@@ -172,7 +172,7 @@ impl ClusterHeap {
         let root_directory_start_cluster = upcase_table_end_cluster;
 
         let mut heap = HashMap::new();
-        let mut lookup = HashMap::new();
+        let mut cluster_lookup = HashMap::new();
         heap.insert(
             root_directory_start_cluster,
             Cluster {
@@ -188,7 +188,7 @@ impl ClusterHeap {
                 ])),
             },
         );
-        lookup.insert(root_directory_start_cluster, root_directory_start_cluster);
+        cluster_lookup.insert(root_directory_start_cluster, root_directory_start_cluster);
 
         for _ in 0..=upcase_table_end_cluster {
             allocation_bitmap.allocate_next_cluster();
@@ -226,7 +226,7 @@ impl ClusterHeap {
             upcase_table_end_cluster,
 
             heap,
-            lookup,
+            cluster_lookup,
             directory_parent: HashMap::new(),
         }
     }
@@ -262,7 +262,7 @@ impl ClusterHeap {
             for (out, byte) in buffer.iter_mut().zip(sector_data) {
                 *out = byte;
             }
-        } else if let Some(first_cluster) = self.lookup.get(&cluster_index).cloned() {
+        } else if let Some(first_cluster) = self.cluster_lookup.get(&cluster_index).cloned() {
             let cluster = self.heap.get_mut(&first_cluster).unwrap();
             let sector = (cluster_index - first_cluster) * self.sectors_per_cluster + sector;
             match &mut cluster.data {
@@ -523,7 +523,7 @@ impl ClusterHeap {
             );
             self.fat.set_cluster(previous_cluster, end_cluster);
             self.fat.set_cluster(end_cluster, END_OF_CHAIN);
-            self.lookup.insert(end_cluster, end_cluster);
+            self.cluster_lookup.insert(end_cluster, end_cluster);
             self.increase_parent_directory_size(root_cluster);
         }
 
@@ -540,7 +540,7 @@ impl ClusterHeap {
         stream_extension_entry.valid_data_length = stream_extension_entry.data_length;
         self.directory_parent
             .insert(directory_cluster, root_cluster);
-        self.lookup.insert(directory_cluster, directory_cluster);
+        self.cluster_lookup.insert(directory_cluster, directory_cluster);
         assert!(self
             .heap
             .insert(
@@ -670,7 +670,7 @@ impl ClusterHeap {
             );
             self.fat.set_cluster(previous_dir_cluster, end_dir_cluster);
             self.fat.set_cluster(end_dir_cluster, END_OF_CHAIN);
-            self.lookup.insert(end_dir_cluster, end_dir_cluster);
+            self.cluster_lookup.insert(end_dir_cluster, end_dir_cluster);
             self.increase_parent_directory_size(dir_cluster);
         }
 
@@ -685,7 +685,7 @@ impl ClusterHeap {
         stream_extension_entry.first_cluster = file_cluster + 2; // FAT index
         stream_extension_entry.data_length = file_size_bytes;
         stream_extension_entry.valid_data_length = stream_extension_entry.data_length;
-        self.lookup.insert(file_cluster, file_cluster);
+        self.cluster_lookup.insert(file_cluster, file_cluster);
 
         // file entry
         let mut file_entry = FileDirectoryEntry::new_file();
@@ -742,7 +742,7 @@ impl ClusterHeap {
             1
         };
         for i in 1..file_size_clusters as u32 {
-            self.lookup.insert(file_cluster + i, file_cluster);
+            self.cluster_lookup.insert(file_cluster + i, file_cluster);
             assert_eq!(
                 file_cluster + i,
                 self.allocation_bitmap
@@ -954,7 +954,7 @@ fn fragmentation() {
     assert_eq!(heap.add_directory(root_cluster, &long_name(4)), Ok(9)); // 98
     assert_eq!(heap.add_directory(root_cluster, &long_name(5)), Ok(10)); // 117
     let mut heap_keys: Vec<_> = heap.heap.keys().cloned().collect();
-    let mut lookup_keys: Vec<_> = heap.lookup.keys().cloned().collect();
+    let mut lookup_keys: Vec<_> = heap.cluster_lookup.keys().cloned().collect();
     heap_keys.sort_unstable();
     lookup_keys.sort_unstable();
     assert_eq!(heap_keys, [3, 4, 5, 6, 7, 8, 9, 10]);
@@ -963,7 +963,7 @@ fn fragmentation() {
 
     assert_eq!(heap.add_directory(root_cluster, &long_name(6)), Ok(12)); // 136
     let mut heap_keys: Vec<_> = heap.heap.keys().cloned().collect();
-    let mut lookup_keys: Vec<_> = heap.lookup.keys().cloned().collect();
+    let mut lookup_keys: Vec<_> = heap.cluster_lookup.keys().cloned().collect();
     heap_keys.sort_unstable();
     lookup_keys.sort_unstable();
     assert_eq!(heap_keys, [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
