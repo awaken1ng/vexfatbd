@@ -686,6 +686,7 @@ impl ClusterHeap {
         stream_extension_entry.data_length = file_size_bytes;
         stream_extension_entry.valid_data_length = stream_extension_entry.data_length;
         self.cluster_lookup.insert(file_cluster, file_cluster);
+        self.parent_lookup.insert(file_cluster, dir_cluster);
 
         // file entry
         let mut file_entry = FileDirectoryEntry::new_file();
