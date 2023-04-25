@@ -150,7 +150,7 @@ pub struct ClusterHeap {
 
     heap: HashMap<u32, Cluster>,
     cluster_lookup: HashMap<u32, u32>,
-    directory_parent: HashMap<u32, u32>,
+    parent_lookup: HashMap<u32, u32>,
 }
 
 impl ClusterHeap {
@@ -227,7 +227,7 @@ impl ClusterHeap {
 
             heap,
             cluster_lookup,
-            directory_parent: HashMap::new(),
+            parent_lookup: HashMap::new(),
         }
     }
 
@@ -316,7 +316,7 @@ impl ClusterHeap {
             return;
         }
 
-        let parent_cluster = self.directory_parent.get(&dir_cluster).cloned().unwrap();
+        let parent_cluster = self.parent_lookup.get(&dir_cluster).cloned().unwrap();
         let cluster_chain: Vec<u32> = [parent_cluster]
             .into_iter()
             .chain(self.fat.chain(parent_cluster))
@@ -538,7 +538,7 @@ impl ClusterHeap {
         stream_extension_entry.first_cluster = directory_cluster + 2; // FAT index
         stream_extension_entry.data_length = u64::from(cluster_size); // empty directory is 1 cluster big
         stream_extension_entry.valid_data_length = stream_extension_entry.data_length;
-        self.directory_parent
+        self.parent_lookup
             .insert(directory_cluster, root_cluster);
         self.cluster_lookup.insert(directory_cluster, directory_cluster);
         assert!(self
