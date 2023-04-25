@@ -260,7 +260,7 @@ impl Default for UpcaseTableDirectoryEntry {
     fn default() -> Self {
         Self {
             entry_type: EntryType::new_with_raw_value(0)
-                .with_type_code(u5::new(1))
+                .with_type_code(u5::new(2))
                 .with_in_use(true), // 0x82
             reserved_1: [0; 3],
             table_checksum: 0xE619D30D,
