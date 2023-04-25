@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use arbitrary_int::{u5, u6};
 use bitbybit::bitfield;
 use bytemuck::{Pod, Zeroable};
@@ -46,7 +48,7 @@ struct EntryType {
 }
 
 #[bitfield(u8)]
-#[derive(Debug, Zeroable, Pod, PartialEq)]
+#[derive(Zeroable, Pod, PartialEq)]
 pub struct GeneralPrimaryFlags {
     /// The `allocation_possible` field shall describe whether or not an allocation in the Cluster Heap is possible for the given directory entry.
     ///
@@ -75,4 +77,13 @@ pub struct GeneralPrimaryFlags {
 
     #[bits(2..=7, rw)]
     custom_defined: u6,
+}
+
+impl Debug for GeneralPrimaryFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneralPrimaryFlags")
+            .field("allocation_possible", &self.allocation_possible())
+            .field("no_fat_chain", &self.no_fat_chain())
+            .finish()
+    }
 }

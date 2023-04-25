@@ -1,5 +1,7 @@
+use std::fmt::{Debug, Write};
+
 use arbitrary_int::u5;
-use bytemuck::{Zeroable, Pod};
+use bytemuck::{Pod, Zeroable};
 
 use super::EntryType;
 
@@ -26,5 +28,21 @@ impl VolumeLabelDirectoryEntry {
 
     pub fn as_bytes(&self) -> &[u8] {
         bytemuck::bytes_of(self)
+    }
+}
+
+impl Debug for VolumeLabelDirectoryEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VolumeLabelDirectoryEntry {{ ")?;
+
+        let stripped = self.volume_label.into_iter().filter(|&ch| ch != 0);
+        let volume = char::decode_utf16(stripped).map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER));
+        for ch in volume {
+            f.write_char(ch)?;
+        }
+
+        write!(f, " }}")?;
+
+        Ok(())
     }
 }

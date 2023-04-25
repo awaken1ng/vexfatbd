@@ -18,7 +18,7 @@ use crate::data_region::volume_label::VolumeLabelDirectoryEntry;
 use crate::fat_region::{FileAllocationTable, END_OF_CHAIN};
 use crate::utils::{unsigned_rounded_up_div, SliceChain};
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum DirectoryEntry {
     VolumeLabel(VolumeLabelDirectoryEntry),
     AllocationBitmap(AllocationBitmapDirectoryEntry),
@@ -129,25 +129,6 @@ impl DirectoryEntry {
             DirectoryEntry::File(entry) => entry.as_bytes(),
             DirectoryEntry::StreamExtension(entry) => entry.as_bytes(),
             DirectoryEntry::FileName(entry) => entry.as_bytes(),
-        }
-    }
-}
-
-impl Debug for DirectoryEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::VolumeLabel(_) => f.debug_tuple("VolumeLabel").finish(),
-            Self::AllocationBitmap(_) => f.debug_tuple("AllocationBitmap").finish(),
-            Self::UpcaseTable(_) => f.debug_tuple("UpcaseTable").finish(),
-            Self::File(_) => f.debug_tuple("File").finish(),
-            Self::StreamExtension(e) => f
-                .debug_struct("StreamExtension")
-                .field("cluster", &(e.first_cluster - 2))
-                .finish(),
-            Self::FileName(e) => f
-                .debug_struct("FileName")
-                .field("name", &String::from_utf16_lossy(e.file_name.as_slice()))
-                .finish(),
         }
     }
 }

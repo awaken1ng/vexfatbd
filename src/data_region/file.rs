@@ -1,4 +1,4 @@
-use std::io;
+use std::{fmt::Debug, io};
 
 use arbitrary_int::{u10, u4, u5, u6, u7};
 use bitbybit::bitfield;
@@ -29,6 +29,21 @@ pub struct FileAttributes {
 
     #[bits(6..=15, rw)]
     reserved_2: u10,
+}
+
+impl Debug for FileAttributes {
+    #[rustfmt::skip]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FileAttributes {{ ")?;
+        if self.read_only() { write!(f, "r")? } else { write!(f, "-")? }
+        if self.hidden()    { write!(f, "h")? } else { write!(f, "-")? }
+        if self.system()    { write!(f, "s")? } else { write!(f, "-")? }
+        if self.directory() { write!(f, "d")? } else { write!(f, "-")? }
+        if self.archive()   { write!(f, "a")? } else { write!(f, "-")? }
+        write!(f, " }}")?;
+
+        Ok(())
+    }
 }
 
 #[bitfield(u32)]
@@ -153,7 +168,17 @@ impl FileDirectoryEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, Zeroable, Pod, PartialEq)]
+impl Debug for FileDirectoryEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileDirectoryEntry")
+            .field("secondary_count", &self.secondary_count)
+            .field("set_checksum", &self.set_checksum)
+            .field("file_attributes", &self.file_attributes)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct StreamExtensionDirectoryEntry {
     entry_type: EntryType,
@@ -224,6 +249,19 @@ impl Default for StreamExtensionDirectoryEntry {
     }
 }
 
+impl Debug for StreamExtensionDirectoryEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamExtensionDirectoryEntry")
+            .field("general_secondary_flags", &self.general_secondary_flags)
+            .field("name_length", &self.name_length)
+            .field("name_hash", &self.name_hash)
+            .field("valid_data_length", &self.valid_data_length)
+            .field("first_cluster", &(self.first_cluster - 2))
+            .field("data_length", &self.data_length)
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct FileNameDirectoryEntry {
@@ -234,7 +272,10 @@ pub struct FileNameDirectoryEntry {
 
 impl FileNameDirectoryEntry {
     pub fn new(name: &[u16]) -> Result<Vec<Self>, FileDirectoryEntryError> {
-        let contains_illegal_chars = name.iter().cloned().any(is_illegal_file_name_character);
+        let contains_illegal_chars = name
+            .iter()
+            .cloned()
+            .any(|c| c == 0x0 || is_illegal_file_name_character(c));
         if contains_illegal_chars {
             return Err(FileDirectoryEntryError::IllegalCharactersInName);
         }
@@ -270,10 +311,24 @@ impl Default for FileNameDirectoryEntry {
     }
 }
 
+impl Debug for FileNameDirectoryEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stripped = self.file_name.into_iter().filter(|&ch| ch != 0);
+        let file_name: String = char::decode_utf16(stripped)
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
+
+        f.debug_struct("FileNameDirectoryEntry")
+            .field("general_secondary_flags", &self.general_secondary_flags)
+            .field("file_name", &file_name)
+            .finish()
+    }
+}
+
 pub fn is_illegal_file_name_character(ch: u16) -> bool {
     matches!(
         ch,
-        0x00..=0x1F | 0x22 | 0x2A | 0x2F | 0x3A | 0x3C | 0x3E | 0x3F | 0x5C | 0x7C
+        0x01..=0x1F | 0x22 | 0x2A | 0x2F | 0x3A | 0x3C | 0x3E | 0x3F | 0x5C | 0x7C
     )
 }
 

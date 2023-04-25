@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use arbitrary_int::u5;
 use bytemuck::{Pod, Zeroable};
 
@@ -266,6 +268,16 @@ impl Default for UpcaseTableDirectoryEntry {
             first_cluster: 3,
             data_length: 0x16CC,
         }
+    }
+}
+
+impl Debug for UpcaseTableDirectoryEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpcaseTableDirectoryEntry")
+            .field("table_checksum", &self.table_checksum)
+            .field("first_cluster", &(self.first_cluster - 2))
+            .field("data_length", &self.data_length)
+            .finish()
     }
 }
 

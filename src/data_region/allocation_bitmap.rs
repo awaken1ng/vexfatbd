@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use arbitrary_int::{u5, u7};
 use bitbybit::bitfield;
 use bytemuck::{Pod, Zeroable};
@@ -144,6 +146,14 @@ pub struct BitmapFlags {
     reserved: u7,
 }
 
+impl Debug for BitmapFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BitmapFlags")
+            .field("is_second_fat", &self.is_second_fat())
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Zeroable, Pod, PartialEq)]
 #[repr(C)]
 pub struct AllocationBitmapDirectoryEntry {
@@ -173,5 +183,15 @@ impl AllocationBitmapDirectoryEntry {
 
     pub fn as_bytes(&self) -> &[u8] {
         bytemuck::bytes_of(self)
+    }
+}
+
+impl Debug for AllocationBitmapDirectoryEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AllocationBitmapDirectoryEntry")
+            .field("bitmap_flags", &self.bitmap_flags)
+            .field("first_cluster", &(self.first_cluster - 2))
+            .field("data_length", &self.data_length)
+            .finish()
     }
 }
