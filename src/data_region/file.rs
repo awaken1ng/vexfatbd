@@ -256,7 +256,7 @@ impl Debug for StreamExtensionDirectoryEntry {
             .field("name_length", &self.name_length)
             .field("name_hash", &self.name_hash)
             .field("valid_data_length", &self.valid_data_length)
-            .field("first_cluster", &(self.first_cluster - 2))
+            .field("first_cluster", &(self.first_cluster.saturating_sub(2)))
             .field("data_length", &self.data_length)
             .finish()
     }
