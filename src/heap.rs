@@ -16,7 +16,7 @@ use crate::data_region::file::{
 use crate::data_region::upcase_table::{upcased_name, UpcaseTableDirectoryEntry, UPCASE_TABLE};
 use crate::data_region::volume_label::VolumeLabelDirectoryEntry;
 use crate::fat_region::{FileAllocationTable, END_OF_CHAIN};
-use crate::utils::{unsigned_rounded_up_div, SliceChain};
+use crate::utils::unsigned_rounded_up_div;
 
 #[derive(Debug, PartialEq)]
 pub enum DirectoryEntry {
@@ -786,12 +786,15 @@ impl DirectoryEntries {
         let bytes_per_sector = buffer.len();
         let bytes_to_skip = sector as usize * bytes_per_sector;
 
-        let slices = self.0.iter().map(|item| item.as_bytes().iter()).collect();
-        let sector_data = SliceChain::new(slices)
+        let sector_data = self.0.iter()
+            .map(|item| item.as_bytes().iter())
+            .flatten()
             .skip(bytes_to_skip)
-            .take(bytes_per_sector);
+            .take(bytes_per_sector)
+            .cloned();
+
         for (buffer_byte, sector_byte) in buffer.iter_mut().zip(sector_data) {
-            *buffer_byte = *sector_byte;
+            *buffer_byte = sector_byte;
         }
     }
 }

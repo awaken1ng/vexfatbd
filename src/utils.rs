@@ -1,36 +1,3 @@
-pub struct SliceChain<T>
-where
-    T: Iterator,
-{
-    slices: Vec<T>,
-}
-
-impl<T> SliceChain<T>
-where
-    T: Iterator,
-{
-    pub fn new(slices: Vec<T>) -> Self {
-        Self { slices }
-    }
-}
-
-impl<T> Iterator for SliceChain<T>
-where
-    T: Iterator,
-{
-    type Item = T::Item;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        for slice in self.slices.iter_mut() {
-            if let Some(a) = slice.next() {
-                return Some(a);
-            }
-        }
-
-        None
-    }
-}
-
 pub fn unsigned_rounded_up_div<T>(a: T, b: T) -> T
 where
     T: num_traits::Unsigned,
@@ -43,13 +10,6 @@ where
     T: num_traits::Unsigned + Copy,
 {
     unsigned_rounded_up_div(a, b).mul(b)
-}
-
-#[test]
-fn chain() {
-    let chain = SliceChain::new(vec![b"123".iter(), b"456".iter()]);
-    let out: Vec<_> = chain.skip(2).take(3).cloned().collect();
-    assert_eq!(out, b"345");
 }
 
 #[test]
