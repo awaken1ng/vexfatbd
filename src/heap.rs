@@ -278,37 +278,57 @@ impl ClusterHeap {
         self.upcase_table_end_cluster
     }
 
-    fn is_name_in_cluster(&self, cluster_index: u32, upcased_name_hash: u16) -> bool {
-        match self.heap.get(&cluster_index) {
-            Some(cluster) => {
+    fn is_name_in_cluster_chain(&self, root_index: u32, upcased_name_hash: u16, file_name: &[u16]) -> bool {
+        let cluster_chain: Vec<u32> = [root_index]
+            .into_iter()
+            .chain(self.fat.chain(root_index))
+            .collect();
+
+        let mut hash_matched = false;
+        let mut name_len = 0;
+        let mut name_offset = 0;
+        let mut name_matched = false;
+
+        // check hash in stream extension, if it matches, then check the file name
+        for cluster_index in cluster_chain {
+            if let Some(cluster) = self.heap.get(&cluster_index) {
                 if let ClusterData::DirectoryEntries(entries) = &cluster.data {
                     for entry in entries.0.iter() {
-                        if let DirectoryEntry::StreamExtension(stream_extension) = entry {
-                            if stream_extension.name_hash == upcased_name_hash {
-                                return true;
-                            }
+                        match entry {
+                            DirectoryEntry::StreamExtension(stream_extension) => {
+                                hash_matched = stream_extension.name_hash == upcased_name_hash;
+                                name_len = usize::from(stream_extension.name_length);
+                                name_offset = 0;
+                                name_matched = false;
+                            },
+                            DirectoryEntry::FileName(e) => {
+                                if !hash_matched {
+                                    continue;
+                                }
+
+                                let name_chunk1 = file_name.iter().skip(name_offset).take(e.file_name.len()).cloned();
+                                let name_chunk2 = e.file_name.iter().cloned().take_while(|&c| c != 0);
+                                for (c1, c2) in name_chunk1.zip(name_chunk2) {
+                                    name_matched = c1 == c2;
+                                    name_offset += 1;
+                                    if !name_matched {
+                                        hash_matched = false;
+                                        continue;
+                                    }
+                                }
+
+                                if name_offset == name_len && name_matched {
+                                    return true;
+                                }
+                            },
+                            _ => {}
                         }
                     }
                 }
-
-                false
             }
-            None => false,
         }
-    }
 
-    fn is_name_in_cluster_chain(&self, root_index: u32, upcased_name_hash: u16) -> bool {
-        if self.is_name_in_cluster(root_index, upcased_name_hash) {
-            true
-        } else {
-            for next_cluster in self.fat.chain(root_index) {
-                if self.is_name_in_cluster(next_cluster, upcased_name_hash) {
-                    return true;
-                }
-            }
-
-            false
-        }
+        false
     }
 
     fn increase_parent_directory_size(&mut self, dir_cluster: u32) {
@@ -479,7 +499,7 @@ impl ClusterHeap {
         let name_utf16: Vec<_> = name.encode_utf16().collect();
         let upcased_name = upcased_name(&name_utf16);
         let name_hash = name_hash(&upcased_name);
-        if self.is_name_in_cluster_chain(root_cluster, name_hash) {
+        if self.is_name_in_cluster_chain(root_cluster, name_hash, &name_utf16) {
             return Err(FileDirectoryEntryError::DuplicateName);
         }
         let file_name_entries = FileNameDirectoryEntry::new(&name_utf16)?;
@@ -621,7 +641,7 @@ impl ClusterHeap {
         let name_utf16: Vec<_> = name.encode_utf16().collect();
         let upcased_name = upcased_name(&name_utf16);
         let name_hash = name_hash(&upcased_name);
-        if self.is_name_in_cluster_chain(dir_cluster, name_hash) {
+        if self.is_name_in_cluster_chain(dir_cluster, name_hash, &name_utf16) {
             return Err(FileDirectoryEntryError::DuplicateName);
         }
         let file_name_entries = FileNameDirectoryEntry::new(&name_utf16)?;
