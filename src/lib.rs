@@ -99,11 +99,15 @@ impl VirtualExFatBlockDevice {
             cluster_count,
         );
 
+        let first_cluster_of_root_directory = heap.root_directory_cluster() + 2;
+        assert!(first_cluster_of_root_directory >= 2);
+        assert!(first_cluster_of_root_directory <= cluster_count + 1);
+
         Ok(Self {
             volume_length,
             cluster_heap_offset,
             cluster_count,
-            first_cluster_of_root_directory: heap.root_directory_cluster() + 2,
+            first_cluster_of_root_directory,
             volume_serial_number,
             fat_offset,
             fat_length,
@@ -555,7 +559,6 @@ fn file() {
     assert_eq!(buffer[0], 0b00111111); // 6 clusters
     assert_eq!(&buffer[1..], [0; 511]);
 
-    // let file_cluster = 5;
     let heap_offest = vexfat.cluster_heap_offset * (1 << vexfat.bytes_per_sector_shift);
     let offset = heap_offest + (file_cluster * (1 << vexfat.bytes_per_sector_shift) * (1 << vexfat.sectors_per_cluster_shift));
     vexfat.seek(SeekFrom::Start(offset as _)).unwrap();
